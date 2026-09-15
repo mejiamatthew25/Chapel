@@ -475,6 +475,1286 @@ let state = {
 };
 
 // Storage layer: reads/writes a single row per key in the `kv_store` table.
+async function safeGet(key, shared){
+  if(!sb) return null;
+  try{
+    const { data, error } = await sb.from('kv_store').select('value').eq('key', key).maybeSingle();
+    if(error) throw error;
+    return data ? data.value : null;
+  }catch(e){ console.error('storage get failed', key, e); return null; }
+}
+async function safeSet(key, value, shared){
+  if(!sb) return;
+  try{
+    const { error } = await sb.from('kv_store').upsert({ key, value });
+    if(error) throw error;
+  }catch(e){ console.error('storage set failed', key, e); }
+}
+
+async function loadAll(){
+  const [roles, slots, signups, churchName, users] = await Promise.all([
+    safeGet('roles', true),
+    safeGet('slots', true),
+    safeGet('signups', true),
+    safeGet('church_name', true),
+    safeGet('users', true)
+  ]);
+  state.roles = roles ? JSON.parse(roles) : [];
+  state.slots = slots ? JSON.parse(slots) : [];
+  state.signups = signups ? JSON.parse(signups) : {};
+  state.churchName = churchName || 'Our Church';
+  state.users = users ? JSON.parse(users) : [];
+  if(state.users.length === 0) state.view = 'setup';
+  state.loaded = true;
+  render();
+}
+
+async function createFirstAdmin(){
+  const name = state.setupName.trim();
+  const username = state.setupUsername.trim().toLowerCase();
+  const password = state.setupPassword;
+  state.setupError = '';
+  if(!name){ state.setupError = 'Enter your name.'; render(); return; }
+  if(!username){ state.setupError = 'Choose a username.'; render(); return; }
+  if(!/^[a-z0-9._-]+$/i.test(username)){ state.setupError = 'Usernames can only contain letters, numbers, dots, dashes, and underscores.'; render(); return; }
+  if(!password || password.length < 4){ state.setupError = 'Password must be at least 4 characters.'; render(); return; }
+  const recovery = randomToken(6).toUpperCase();
+  const salt = randomHex(16);
+  const hash = await hashPassword(password, salt);
+  const id = uid();
+
+  const adminUser = { id, name, username, salt, hash, recovery, isAdmin:true };
+  state.users.push(adminUser);
+  state.currentUser = { id, name, username, isAdmin:true };
+  
+  // Persist state to DB prior to UI transition
+  await persistUsers();
+
+  state.setupName=''; state.setupUsername=''; state.setupPassword='';
+  state.view = 'admin';
+  render();
+}
+
+function uid(){ return Math.random().toString(36).slice(2,10); }
+function randomHex(bytes){
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randomToken(len){
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  let out='';
+  for(let i=0;i<len;i++) out += TOKEN_CHARS[arr[i]%TOKEN_CHARS.length];
+  return out;
+}
+async function sha256Hex(str){
+  const enc = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function hashPassword(password, salt){ return sha256Hex(salt+':'+password); }
+
+function fmtTime(t){
+  const [h,m] = t.split(':').map(Number);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if(h12===0) h12=12;
+  return `${h12}:${String(m).padStart(2,'0')} ${ampm}`;
+}
+function isoDate(d){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function sameDate(a,b){ return isoDate(a)===isoDate(b); }
+function fmtDateLong(d){
+  return d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' });
+}
+function roleById(id){ return state.roles.find(r=>r.id===id); }
+function userById(id){ return state.users.find(u=>u.id===id); }
+
+function slotsForDate(d){
+  const dow = d.getDay();
+  return state.slots
+    .filter(s=>Number(s.day)===dow)
+    .map(slot=>({ slot, role:roleById(slot.roleId) }))
+    .filter(x=>x.role)
+    .sort((a,b)=>a.slot.start.localeCompare(b.slot.start));
+}
+
+async function persistSignups(){ await safeSet('signups', JSON.stringify(state.signups), true); }
+async function persistUsers(){ await safeSet('users', JSON.stringify(state.users), true); }
+
+// ---------- AUTH ----------
+
+async function login(){
+  const uname = state.loginUsername.trim().toLowerCase();
+  const pass = state.loginPassword;
+  if(!uname || !pass){ state.loginError='Enter your username and password.'; render(); return; }
+  const user = state.users.find(u=>u.username.toLowerCase()===uname);
+  if(!user){ state.loginError='No account found with that username.'; render(); return; }
+  const hash = await hashPassword(pass, user.salt);
+  if(hash !== user.hash){ state.loginError='Incorrect password.'; render(); return; }
+  
+  state.currentUser = { id:user.id, name:user.name, username:user.username, isAdmin:!!user.isAdmin };
+  state.loginError=''; state.loginUsername=''; state.loginPassword='';
+  
+  // Every user is directed straight to the signup page after logging in
+  state.view='signup';
+  render();
+}
+function logout(){
+  state.currentUser=null;
+  state.view='login';
+  state.loginError='';
+  render();
+}
+async function recoverPassword(){
+  const uname = state.recoverUsername.trim().toLowerCase();
+  const code = state.recoverCode.trim();
+  const newPass = state.recoverNewPassword;
+  state.recoverError=''; state.recoverSuccess='';
+  if(!uname || !code || !newPass){ state.recoverError='Fill in all fields.'; render(); return; }
+  const user = state.users.find(u=>u.username.toLowerCase()===uname);
+  if(!user){ state.recoverError='No account found with that username.'; render(); return; }
+  if(code.toUpperCase() !== (user.recovery||'').toUpperCase()){ state.recoverError='That recovery code does not match.'; render(); return; }
+  if(newPass.length < 4){ state.recoverError='Choose a password with at least 4 characters.'; render(); return; }
+  const salt = randomHex(16);
+  user.salt = salt;
+  user.hash = await hashPassword(newPass, salt);
+  state.recoverSuccess = 'Password updated. You can sign in now.';
+  state.recoverUsername=''; state.recoverCode=''; state.recoverNewPassword='';
+  render();
+  await persistUsers();
+}
+async function changePassword(){
+  state.cpError=''; state.cpSuccess='';
+  const user = userById(state.currentUser.id);
+  if(!user) return;
+  if(!state.cpCurrent || !state.cpNew){ state.cpError='Fill in both fields.'; render(); return; }
+  const hash = await hashPassword(state.cpCurrent, user.salt);
+  if(hash !== user.hash){ state.cpError='Current password is incorrect.'; render(); return; }
+  if(state.cpNew.length < 4){ state.cpError='New password must be at least 4 characters.'; render(); return; }
+  const salt = randomHex(16);
+  user.salt = salt;
+  user.hash = await hashPassword(state.cpNew, salt);
+  state.cpSuccess = 'Password changed.';
+  state.cpCurrent=''; state.cpNew='';
+  render();
+  await persistUsers();
+}
+
+function openSignupForm(key){ state.openSignupFor = key; render(); }
+
+async function submitSignup(key, capacity){
+  if(!state.currentUser) return;
+  const list = state.signups[key] || [];
+  if(list.length >= capacity) return;
+  if(list.some(e=>e.userId===state.currentUser.id)) return;
+  list.push({ userId: state.currentUser.id, name: state.currentUser.name });
+  state.signups[key] = list;
+  render();
+  await persistSignups();
+}
+function askRemoveSignup(target){ state.confirmTarget = target; render(); }
+async function removeSignup(key, userId){
+  const list = state.signups[key] || [];
+  state.signups[key] = list.filter(e=>e.userId!==userId);
+  state.confirmTarget = null;
+  render();
+  await persistSignups();
+}
+
+// ---------- CALENDAR ----------
+
+function changeMonth(delta){
+  const d = state.calendarMonth;
+  state.calendarMonth = new Date(d.getFullYear(), d.getMonth()+delta, 1);
+  render();
+}
+function selectDate(y,m,day){
+  state.selectedDate = new Date(y,m,day);
+  state.openSignupFor = null;
+  state.confirmTarget = null;
+  render();
+}
+
+function renderCalendar(){
+  const cm = state.calendarMonth;
+  const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
+  const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
+
+  let cells = '';
+  for(let i=0;i<firstDow;i++) cells += `<div class="cal-cell empty"></div>`;
+
+  for(let day=1; day<=numDays; day++){
+    const d = new Date(cm.getFullYear(), cm.getMonth(), day);
+    const daySlots = slotsForDate(d);
+    const isToday = sameDate(d, today);
+    const isSelected = sameDate(d, state.selectedDate);
+    const uniqueRoles = [...new Map(daySlots.map(x=>[x.role.id,x.role])).values()];
+    const shown = uniqueRoles.slice(0,4);
+    const extra = uniqueRoles.length - shown.length;
+    const dots = shown.map(r=>`<span style="background:${r.color}"></span>`).join('') + (extra>0?`<span class="more">+${extra}</span>`:'');
+
+    cells += `
+      <button type="button" class="cal-cell ${isToday?'today':''} ${isSelected?'selected':''} ${daySlots.length?'has-slots':''}"
+        onclick="selectDate(${cm.getFullYear()},${cm.getMonth()},${day})">
+        <span class="num">${day}</span>
+        <span class="cal-dots">${dots}</span>
+      </button>`;
+  }
+
+  const dow = DOW_SHORT.map(s=>`<div class="cal-dow">${s}</div>`).join('');
+
+  return `
+    <div class="cal-nav">
+      <div class="month-label">${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}</div>
+      <div class="cal-nav-btns">
+        <button onclick="changeMonth(-1)" aria-label="Previous month">‹</button>
+        <button onclick="changeMonth(1)" aria-label="Next month">›</button>
+      </div>
+    </div>
+    <div class="cal-grid">${dow}${cells}</div>
+  `;
+}
+
+function renderDayPanel(){
+  const d = state.selectedDate;
+  const daySlots = slotsForDate(d);
+  const isPast = d < today;
+
+  let inner = '';
+  if(daySlots.length === 0){
+    inner = `<p class="past-note">Nothing scheduled this day.</p>`;
+  } else {
+    if(isPast) inner += `<p class="past-note">This date has passed.</p>`;
+    inner += daySlots.map(({slot, role})=>{
+      const key = `${slot.id}__${isoDate(d)}`;
+      const filled = state.signups[key] || [];
+      const cap = slot.capacity;
+      const isFull = filled.length >= cap;
+      const iAmIn = filled.some(e=>e.userId===state.currentUser.id);
+      const capDots = Array.from({length:cap}).map((_,i)=>`<span class="${i<filled.length?'on':''}"></span>`).join('');
+
+      const namesHtml = filled.length ? `<div class="names">${filled.map(e=>{
+        const mine = e.userId===state.currentUser.id;
+        if(!mine) return `<span class="chip">${escapeHtml(e.name)}</span>`;
+        const ctarget = `signup:${key}`;
+        if(state.confirmTarget===ctarget){
+          return `<span class="chip confirming">${escapeHtml(e.name)}
+            <span class="confirm-inline">Cancel?
+              <button class="yes" onclick="removeSignup('${key}','${e.userId}')">Yes</button>
+              <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+            </span>
+          </span>`;
+        }
+        return `<span class="chip mine">${escapeHtml(e.name)}<button title="Cancel" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+      }).join('')}</div>` : '';
+
+      let actionHtml = '';
+      if(!isPast){
+        if(iAmIn){
+          actionHtml = `<div style="margin-top:8px" class="fill-status mine">You're signed up for this.</div>`;
+        } else {
+          actionHtml = `<button class="signup-btn" ${isFull?'disabled':''} onclick="submitSignup('${key}',${cap})">${isFull?'Full':'Sign up'}</button>`;
+        }
+      }
+
+      return `
+        <div class="slot-row">
+          <div class="slot-top">
+            <div class="role-tag"><span class="dot" style="background:${role.color}"></span>${escapeHtml(role.name)}</div>
+            <div class="fill-status ${isFull?'full':''}">${isFull ? 'Filled' : `${filled.length} of ${cap} filled`}</div>
+          </div>
+          <div class="slot-time">${fmtTime(slot.start)} – ${fmtTime(slot.end)}</div>
+          <div class="capacity-dots">${capDots}</div>
+          ${namesHtml}
+          ${actionHtml}
+        </div>`;
+    }).join('');
+  }
+
+  return `
+    <div class="day-panel">
+      <div class="day-panel-heading">${fmtDateLong(d)}</div>
+      ${inner}
+    </div>
+  `;
+}
+
+function renderSignupView(){
+  if(state.roles.length===0 || state.slots.length===0){
+    return `
+      <div class="empty">
+        No volunteer slots have been set up yet.<br>Ask your administrator to add roles and time slots in Admin.
+      </div>`;
+  }
+  return renderCalendar() + renderDayPanel();
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s){ return escapeHtml(s).replace(/'/g,'&#39;'); }
+
+// ---------- AUTH VIEWS ----------
+
+function renderLogin(){
+  return `
+    <div class="auth-box">
+      <h2>Sign in</h2>
+      <p>Enter the username and password your administrator gave you.</p>
+      ${state.users.length===0 ? `<p class="past-note">No volunteer accounts exist yet. Ask your administrator to create one in Admin.</p>` : ''}
+      <div class="field" style="margin-bottom:10px">
+        <input class="wide" type="text" placeholder="Username" value="${escapeAttr(state.loginUsername)}" oninput="state.loginUsername=this.value" onkeydown="if(event.key==='Enter'){login()}">
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <input class="wide" type="password" placeholder="Password" value="${escapeAttr(state.loginPassword)}" oninput="state.loginPassword=this.value" onkeydown="if(event.key==='Enter'){login()}">
+      </div>
+      <button class="btn" onclick="login()">Sign in</button>
+      <div class="auth-error">${state.loginError}</div>
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='recover'; state.recoverError=''; state.recoverSuccess=''; render()">Forgot your password?</button></div>
+    </div>
+  `;
+}
+
+function renderSetup(){
+  return `
+    <div class="auth-box">
+      <h2>Set up your church</h2>
+      <p>You're the first person here, so let's create your administrator account. You'll be able to add roles, time slots, and accounts for everyone else once you're signed in.</p>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="text" placeholder="Your name" value="${escapeAttr(state.setupName)}" oninput="state.setupName=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="text" placeholder="Choose a username" value="${escapeAttr(state.setupUsername)}" oninput="state.setupUsername=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="Choose a password" value="${escapeAttr(state.setupPassword)}" oninput="state.setupPassword=this.value" onkeydown="if(event.key==='Enter'){createFirstAdmin()}"></div>
+      <button class="btn" onclick="createFirstAdmin()">Create admin account</button>
+      <div class="auth-error">${state.setupError}</div>
+    </div>
+  `;
+}
+
+function renderRecover(){
+  return `
+    <div class="auth-box">
+      <h2>Reset your password</h2>
+      <p>Enter your username and the recovery code your administrator gave you.</p>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="text" placeholder="Username" value="${escapeAttr(state.recoverUsername)}" oninput="state.recoverUsername=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="text" placeholder="Recovery code" value="${escapeAttr(state.recoverCode)}" oninput="state.recoverCode=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="New password" value="${escapeAttr(state.recoverNewPassword)}" oninput="state.recoverNewPassword=this.value" onkeydown="if(event.key==='Enter'){recoverPassword()}"></div>
+      <button class="btn" onclick="recoverPassword()">Set new password</button>
+      <div class="auth-error">${state.recoverError}</div>
+      ${state.recoverSuccess ? `<div class="auth-success">${state.recoverSuccess}</div>` : ''}
+      <p style="font-size:12.5px; margin-top:16px;">Lost your recovery code too? Ask your administrator to reset your password instead.</p>
+      <div style="margin-top:6px"><button class="small-link" onclick="state.view='login'; state.loginError=''; render()">Back to sign in</button></div>
+    </div>
+  `;
+}
+
+function renderChangePass(){
+  return `
+    <div class="auth-box">
+      <h2>Change password</h2>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="Current password" value="${escapeAttr(state.cpCurrent)}" oninput="state.cpCurrent=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="New password" value="${escapeAttr(state.cpNew)}" oninput="state.cpNew=this.value" onkeydown="if(event.key==='Enter'){changePassword()}"></div>
+      <button class="btn" onclick="changePassword()">Update password</button>
+      <div class="auth-error">${state.cpError}</div>
+      ${state.cpSuccess ? `<div class="auth-success">${state.cpSuccess}</div>` : ''}
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='signup'; render()">Back</button></div>
+    </div>
+  `;
+}
+
+// ---------- ADMIN ----------
+
+async function saveChurchName(){
+  const val = state.newChurchName.trim();
+  if(!val) return;
+  state.churchName = val;
+  state.newChurchName = '';
+  render();
+  await safeSet('church_name', val, true);
+}
+
+async function addRole(){
+  const name = state.newRoleName.trim();
+  if(!name) return;
+  state.roles.push({ id:uid(), name, color:state.newRoleColor });
+  state.newRoleName = '';
+  render();
+  await safeSet('roles', JSON.stringify(state.roles), true);
+}
+async function deleteRole(id){
+  const slotIdsToRemove = state.slots.filter(s=>s.roleId===id).map(s=>s.id);
+  state.roles = state.roles.filter(r=>r.id!==id);
+  state.slots = state.slots.filter(s=>s.roleId!==id);
+  for(const key of Object.keys(state.signups)){
+    if(slotIdsToRemove.some(sid=>key.startsWith(sid+'__'))) delete state.signups[key];
+  }
+  state.confirmTarget = null;
+  render();
+  await Promise.all([
+    safeSet('roles', JSON.stringify(state.roles), true),
+    safeSet('slots', JSON.stringify(state.slots), true),
+    safeSet('signups', JSON.stringify(state.signups), true)
+  ]);
+}
+
+async function addSlot(){
+  const { roleId, day, start, end, capacity } = state.newSlot;
+  state.slotFormError = '';
+  if(!roleId){ state.slotFormError = 'Choose a role first.'; render(); return; }
+  if(!start || !end){ state.slotFormError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.slotFormError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.slotFormError = 'Volunteers needed must be at least 1.'; render(); return; }
+  state.slots.push({ id:uid(), roleId, day, start, end, capacity:Number(capacity) });
+  render();
+  await safeSet('slots', JSON.stringify(state.slots), true);
+}
+async function deleteSlot(id){
+  state.slots = state.slots.filter(s=>s.id!==id);
+  for(const key of Object.keys(state.signups)){
+    if(key.startsWith(id+'__')) delete state.signups[key];
+  }
+  state.confirmTarget = null;
+  render();
+  await Promise.all([
+    safeSet('slots', JSON.stringify(state.slots), true),
+    safeSet('signups', JSON.stringify(state.signups), true)
+  ]);
+}
+
+function slugifyBase(name){
+  let base = name.toLowerCase().replace(/[^a-z0-9._-]/g,'');
+  return base || '';
+}
+function useNameAsUsername(){
+  state.newUserUsername = slugifyBase(state.newUserName);
+  render();
+}
+
+async function addUser(){
+  const name = state.newUserName.trim();
+  const username = state.newUserUsername.trim().toLowerCase();
+  const password = state.newUserPassword;
+  state.userFormError = '';
+  if(!name){ state.userFormError = "Enter the volunteer's name."; render(); return; }
+  if(!username){ state.userFormError = 'Choose a username.'; render(); return; }
+  if(!/^[a-z0-9._-]+$/i.test(username)){ state.userFormError = 'Usernames can only contain letters, numbers, dots, dashes, and underscores.'; render(); return; }
+  if(state.users.some(u=>u.username.toLowerCase()===username)){ state.userFormError = 'That username is already taken.'; render(); return; }
+  if(!password || password.length < 4){ state.userFormError = 'Password must be at least 4 characters.'; render(); return; }
+  const recovery = randomToken(6).toUpperCase();
+  const salt = randomHex(16);
+  const hash = await hashPassword(password, salt);
+  const id = uid();
+  const isFirstAccount = state.users.length === 0;
+  state.users.push({ id, name, username, salt, hash, recovery, isAdmin: isFirstAccount ? true : !!state.newUserIsAdmin });
+  state.knownPasswords[id] = password;
+  state.newUserName = ''; state.newUserUsername = ''; state.newUserPassword = ''; state.newUserIsAdmin = false;
+  state.lastCreated = { name, username, password, recovery };
+  state.lastReset = null;
+  render();
+  await persistUsers();
+}
+
+async function toggleAdmin(id){
+  const user = userById(id);
+  if(!user) return;
+  state.userFormError = '';
+  if(user.isAdmin){
+    const adminCount = state.users.filter(u=>u.isAdmin).length;
+    if(adminCount <= 1){ state.userFormError = "Can't remove admin access from the only admin account."; render(); return; }
+    user.isAdmin = false;
+  } else {
+    user.isAdmin = true;
+  }
+  if(state.currentUser && state.currentUser.id===id) state.currentUser.isAdmin = user.isAdmin;
+  render();
+  await persistUsers();
+}
+
+function openResetPassword(id){
+  state.resetPasswordFor = id;
+  state.resetPasswordDraft = '';
+  state.resetPasswordError = '';
+  state.confirmTarget = null;
+  render();
+}
+function cancelResetPassword(){
+  state.resetPasswordFor = null;
+  state.resetPasswordError = '';
+  render();
+}
+async function saveResetPassword(id){
+  const pass = state.resetPasswordDraft;
+  if(!pass || pass.length < 4){ state.resetPasswordError = 'Password must be at least 4 characters.'; render(); return; }
+  const user = userById(id);
+  if(!user) return;
+  const salt = randomHex(16);
+  user.salt = salt;
+  user.hash = await hashPassword(pass, salt);
+  state.knownPasswords[id] = pass;
+  state.lastReset = { username:user.username, password:pass };
+  state.lastCreated = null;
+  state.resetPasswordFor = null;
+  state.resetPasswordDraft = '';
+  state.resetPasswordError = '';
+  render();
+  await persistUsers();
+}
+async function regenerateRecovery(id){
+  const user = userById(id);
+  if(!user) return;
+  user.recovery = randomToken(6).toUpperCase();
+  state.lastReset = { username:user.username, recovery:user.recovery };
+  state.lastCreated = null;
+  render();
+  await persistUsers();
+}
+async function deleteUser(id){
+  const user = userById(id);
+  if(user && user.isAdmin){
+    const adminCount = state.users.filter(u=>u.isAdmin).length;
+    if(adminCount <= 1){ state.userFormError = "Can't delete the only admin account."; state.confirmTarget = null; render(); return; }
+  }
+  state.users = state.users.filter(u=>u.id!==id);
+  for(const key of Object.keys(state.signups)){
+    state.signups[key] = (state.signups[key]||[]).filter(e=>e.userId!==id);
+  }
+  delete state.knownPasswords[id];
+  state.confirmTarget = null;
+  if(state.currentUser && state.currentUser.id===id){ state.currentUser = null; state.view = 'login'; }
+  render();
+  await Promise.all([persistUsers(), persistSignups()]);
+}
+
+function csvField(s){
+  s = String(s === undefined || s === null ? '' : s);
+  if(/[",\r\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+  return s;
+}
+function exportAccountsCSV(){
+  const rows = [['Name','Username','Temporary Password','Recovery Code','Admin']];
+  for(const u of state.users){
+    const pass = state.knownPasswords[u.id] || '(not available — set or reset it to include here)';
+    rows.push([u.name, u.username, pass, u.recovery, u.isAdmin ? 'Yes' : '']);
+  }
+  const csv = rows.map(r=>r.map(csvField).join(',')).join('\r\n');
+  const blob = new Blob(['\uFEFF' + csv], { type:'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `volunteer-accounts-${isoDate(new Date())}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function renderAdmin(){
+  const sortedSlots = [...state.slots].sort((a,b)=> Number(a.day)-Number(b.day) || a.start.localeCompare(b.start));
+
+  let banner = '';
+  if(state.lastCreated){
+    const c = state.lastCreated;
+    banner = `
+      <div class="credential-banner">
+        Account created for <strong>${escapeHtml(c.name)}</strong>. Share these with them — shown only once:<br>
+        Username: <strong>${escapeHtml(c.username)}</strong> &nbsp; Password: <strong>${escapeHtml(c.password)}</strong> &nbsp; Recovery code: <strong>${escapeHtml(c.recovery)}</strong>
+        <div class="dismiss"><button class="small-link" onclick="state.lastCreated=null; render()">Dismiss</button></div>
+      </div>`;
+  } else if(state.lastReset){
+    const r = state.lastReset;
+    banner = `
+      <div class="credential-banner">
+        ${r.password ? `New password for <strong>${escapeHtml(r.username)}</strong>: <strong>${escapeHtml(r.password)}</strong>` : `New recovery code for <strong>${escapeHtml(r.username)}</strong>: <strong>${escapeHtml(r.recovery)}</strong>`} — shown only once, share it with them.
+        <div class="dismiss"><button class="small-link" onclick="state.lastReset=null; render()">Dismiss</button></div>
+      </div>`;
+  }
+
+  return `
+    <div class="admin-section">
+      <h2>Church name</h2>
+      <div class="field-row">
+        <input type="text" placeholder="${escapeAttr(state.churchName)}" value="${escapeAttr(state.newChurchName)}" oninput="state.newChurchName=this.value">
+        <button class="btn secondary" onclick="saveChurchName()">Save</button>
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>Volunteer accounts</h2>
+      <p class="sub">Create a login for each volunteer by name. Passwords are stored hashed, but this isn't a high-security login system — ask people not to reuse an important password here.</p>
+      <div class="field-row" style="margin-bottom:4px">
+        <button class="btn secondary" onclick="exportAccountsCSV()" ${state.users.length?'':'disabled'}>Export accounts (.csv)</button>
+      </div>
+      <p class="sub" style="margin-top:0">Includes a temporary password only for accounts you've created or reset since this page was last loaded — passwords aren't kept anywhere in readable form otherwise.</p>
+      ${banner}
+      <div class="user-list">
+        ${state.users.length ? state.users.map(u=>{
+          const target = `user:${u.id}`;
+          let right;
+          if(state.resetPasswordFor===u.id){
+            right = `<span class="row-actions">
+                 <input type="text" placeholder="New password" value="${escapeAttr(state.resetPasswordDraft)}" oninput="state.resetPasswordDraft=this.value" onkeydown="if(event.key==='Enter'){saveResetPassword('${u.id}')}" style="width:140px">
+                 <button class="small-link" onclick="saveResetPassword('${u.id}')">Save</button>
+                 <button class="small-link" onclick="cancelResetPassword()">Cancel</button>
+               </span>`;
+          } else if(state.confirmTarget===target){
+            right = `<span class="confirm-inline">Delete account?
+                 <button class="yes" onclick="deleteUser('${u.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`;
+          } else {
+            right = `<span class="row-actions">
+                 <button class="small-link" onclick="toggleAdmin('${u.id}')">${u.isAdmin ? 'Remove admin' : 'Make admin'}</button>
+                 <button class="small-link" onclick="openResetPassword('${u.id}')">Set new password</button>
+                 <button class="small-link" onclick="regenerateRecovery('${u.id}')">New recovery code</button>
+                 <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+               </span>`;
+          }
+          return `
+          <div class="user-item">
+            <div class="left">${escapeHtml(u.name)}<span class="uname">@${escapeHtml(u.username)}${u.isAdmin ? ' · admin' : ''}</span></div>
+            ${right}
+          </div>
+          ${state.resetPasswordFor===u.id && state.resetPasswordError ? `<div class="form-error" style="margin:-4px 0 8px">${escapeHtml(state.resetPasswordError)}</div>` : ''}`;
+        }).join('') : `<p class="sub">No accounts yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Volunteer's name</label>
+          <input type="text" placeholder="e.g. Jane Doe" value="${escapeAttr(state.newUserName)}" oninput="state.newUserName=this.value">
+        </div>
+        <div class="field">
+          <label>Username</label>
+          <input type="text" placeholder="e.g. jane.doe" value="${escapeAttr(state.newUserUsername)}" oninput="state.newUserUsername=this.value">
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="text" placeholder="At least 4 characters" value="${escapeAttr(state.newUserPassword)}" oninput="state.newUserPassword=this.value" onkeydown="if(event.key==='Enter'){addUser()}">
+        </div>
+        <button class="btn" onclick="addUser()" style="align-self:flex-end">Create account</button>
+      </div>
+      <div style="margin:2px 0 10px; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="newUserIsAdmin" ${state.newUserIsAdmin ? 'checked' : ''} onchange="state.newUserIsAdmin=this.checked" style="width:auto">
+        <label for="newUserIsAdmin" style="font-size:13px; color:var(--ink-soft); margin:0; cursor:pointer;">Give this account admin access</label>
+      </div>
+      <div style="margin:-4px 0 4px"><button class="small-link" onclick="useNameAsUsername()">Use name as username</button></div>
+      ${state.userFormError ? `<div class="form-error">${escapeHtml(state.userFormError)}</div>` : ''}
+    </div>
+
+    <div class="admin-section">
+      <h2>Roles</h2>
+      <p class="sub">Roles are the kinds of volunteers needed, like Greeter or Nursery.</p>
+      <div class="role-list">
+        ${state.roles.length ? state.roles.map(r=>{
+          const slotsUsing = state.slots.filter(s=>s.roleId===r.id).length;
+          const target = `role:${r.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">${slotsUsing? `Also deletes ${slotsUsing} slot(s) —` : ''} delete?
+                 <button class="yes" onclick="deleteRole('${r.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+          return `
+          <div class="role-item">
+            <div class="left"><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No roles yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role name</label>
+          <input type="text" placeholder="e.g. Greeter" value="${escapeAttr(state.newRoleName)}" oninput="state.newRoleName=this.value">
+        </div>
+        <div class="field">
+          <label>Color</label>
+          <div class="color-picker">
+            ${PALETTE.map(c=>`<button type="button" style="background:${c}" class="${state.newRoleColor===c?'selected':''}" onclick="state.newRoleColor='${c}'; render()"></button>`).join('')}
+          </div>
+        </div>
+        <button class="btn" onclick="addRole()" style="align-self:flex-end">Add role</button>
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>Weekly time slots</h2>
+      <p class="sub">These repeat every week. Set how many volunteers each one needs.</p>
+      <div class="slot-list">
+        ${sortedSlots.length ? sortedSlots.map(s=>{
+          const role = roleById(s.roleId);
+          const target = `slot:${s.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">Delete?
+                 <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+          return `
+          <div class="slot-item">
+            <div class="left">
+              <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
+              ${role?escapeHtml(role.name):'(deleted role)'} — ${DAY_NAMES[Number(s.day)]}, ${fmtTime(s.start)}–${fmtTime(s.end)}, needs ${s.capacity}
+            </div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No time slots yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.newSlot.roleId=this.value">
+            <option value="" ${!state.newSlot.roleId?'selected':''}>Select role</option>
+            ${state.roles.map(r=>`<option value="${r.id}" ${state.newSlot.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Day</label>
+          <select onchange="state.newSlot.day=this.value">
+            ${DAY_NAMES.map((d,i)=>`<option value="${i}" ${state.newSlot.day==String(i)?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${state.newSlot.start}" oninput="state.newSlot.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${state.newSlot.end}" oninput="state.newSlot.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${state.newSlot.capacity}" style="width:80px" oninput="state.newSlot.capacity=this.value">
+        </div>
+        <button class="btn" onclick="addSlot()" style="align-self:flex-end">Add slot</button>
+      </div>
+      ${state.slotFormError ? `<div class="form-error">${escapeHtml(state.slotFormError)}</div>` : ''}
+    </div>
+  `;
+}
+
+function goAdmin(){
+  if(!state.currentUser || !state.currentUser.isAdmin) return;
+  state.view = 'admin';
+  state.confirmTarget = null;
+  render();
+}
+function goSignup(){
+  state.view = state.currentUser ? 'signup' : 'login';
+  state.confirmTarget = null;
+  render();
+}
+
+function render(){
+  const app = document.getElementById('app');
+  if(!state.loaded){
+    app.innerHTML = `<div class="loading">Loading schedule…</div>`;
+    return;
+  }
+
+  // first-run setup only applies while there are no accounts at all
+  if(state.view==='setup' && state.users.length > 0){
+    state.view = 'login';
+  }
+  // guard views that require a session
+  if((state.view==='signup' || state.view==='changepass') && !state.currentUser){
+    state.view = 'login';
+  }
+  // guard admin view to admin accounts only
+  if(state.view==='admin' && (!state.currentUser || !state.currentUser.isAdmin)){
+    state.view = state.currentUser ? 'signup' : 'login';
+  }
+
+  const bareViews = ['login','setup','recover','changepass'];
+  const isBare = bareViews.includes(state.view);
+
+  let navHtml = '';
+  if(!isBare){
+    if(state.view==='admin'){
+      navHtml = `
+        <div class="nav-side">
+          <span class="whoami">Signed in as ${escapeHtml(state.currentUser.name)}</span>
+          <div class="nav-links">
+            <button class="navlink" onclick="goSignup()">View sign-up sheet</button>
+            <button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>
+            <button class="navlink" onclick="logout()">Sign out</button>
+          </div>
+        </div>`;
+    } else {
+      navHtml = `
+        <div class="nav-side">
+          <span class="whoami">Signed in as ${escapeHtml(state.currentUser.name)}</span>
+          <div class="nav-links">
+            ${state.currentUser.isAdmin ? `<button class="navlink" onclick="goAdmin()">Admin</button>` : ''}
+            <button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>
+            <button class="navlink" onclick="logout()">Sign out</button>
+          </div>
+        </div>`;
+    }
+  }
+
+  const heading = state.view==='admin'
+    ? `<div class="titleblock"><h1>Admin</h1><p>Manage roles, slots, and accounts</p></div>`
+    : `<div class="titleblock"><h1>${escapeHtml(state.churchName)}</h1><p>Volunteer sign-up</p></div>`;
+
+  let body = '';
+  if(state.view==='admin') body = renderAdmin();
+  else if(state.view==='login') body = renderLogin();
+  else if(state.view==='setup') body = renderSetup();
+  else if(state.view==='recover') body = renderRecover();
+  else if(state.view==='changepass') body = renderChangePass();
+  else body = renderSignupView();
+
+  app.innerHTML = `
+    <header class="top">
+      ${heading}
+      ${navHtml}
+    </header>
+    ${body}
+  `;
+}
+
+loadAll();
+</script>
+</body>
+</html>    justify-content:space-between;
+    align-items:flex-start;
+    gap:16px;
+    margin-bottom:24px;
+  }
+  .titleblock h1{
+    font-family:'Source Serif 4', serif;
+    font-weight:700;
+    font-size:30px;
+    line-height:1.15;
+    margin:0 0 4px;
+    letter-spacing:-0.01em;
+  }
+  .titleblock p{
+    margin:0;
+    color:var(--ink-soft);
+    font-size:14.5px;
+  }
+  .nav-side{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-end;
+    gap:4px;
+  }
+  .nav-side .whoami{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .nav-links{ display:flex; gap:10px; }
+  .navlink{
+    background:none;
+    border:none;
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    color:var(--ink-soft);
+    cursor:pointer;
+    padding:6px 0;
+    text-decoration:underline;
+    text-decoration-color:var(--line);
+    text-underline-offset:3px;
+    white-space:nowrap;
+  }
+  .navlink:hover{ color:var(--ink); text-decoration-color:var(--ink-soft); }
+
+  /* ---- calendar ---- */
+  .cal-nav{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:10px;
+  }
+  .cal-nav .month-label{
+    font-family:'Source Serif 4', serif;
+    font-size:18px;
+    font-weight:600;
+  }
+  .cal-nav-btns{ display:flex; gap:6px; }
+  .cal-nav-btns button{
+    background:var(--white);
+    border:1px solid var(--line);
+    width:30px; height:30px;
+    border-radius:5px;
+    cursor:pointer;
+    font-size:15px;
+    color:var(--ink);
+    line-height:1;
+  }
+  .cal-nav-btns button:hover{ border-color:var(--ink-soft); }
+
+  .cal-grid{
+    display:grid;
+    grid-template-columns:repeat(7,1fr);
+    gap:3px;
+    margin-bottom:4px;
+  }
+  .cal-dow{
+    text-align:center;
+    font-size:11px;
+    color:var(--ink-soft);
+    padding-bottom:6px;
+  }
+  .cal-cell{
+    background:var(--white);
+    border:1px solid var(--line);
+    border-radius:6px;
+    min-height:52px;
+    padding:5px 5px 6px;
+    cursor:pointer;
+    text-align:left;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    font-family:'Inter',sans-serif;
+  }
+  .cal-cell.empty{
+    background:transparent;
+    border-color:transparent;
+    cursor:default;
+  }
+  .cal-cell .num{
+    font-size:12.5px;
+    color:var(--ink-soft);
+  }
+  .cal-cell.today .num{
+    color:var(--white);
+    background:var(--ink);
+    width:19px;height:19px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .cal-cell.selected{
+    border-color:var(--ink);
+    box-shadow:inset 0 0 0 1px var(--ink);
+  }
+  .cal-cell.has-slots:hover{ border-color:var(--ink-soft); }
+  .cal-dots{ display:flex; gap:3px; flex-wrap:wrap; }
+  .cal-dots span{ width:6px;height:6px;border-radius:50%; }
+  .cal-dots .more{ font-size:9.5px; color:var(--ink-soft); }
+
+  @media (max-width:420px){
+    .cal-cell{ min-height:42px; padding:4px; }
+    .cal-dow{ font-size:9.5px; }
+  }
+
+  /* ---- day panel ---- */
+  .day-panel{ margin-top:22px; }
+  .day-panel-heading{
+    font-family:'Source Serif 4', serif;
+    font-size:19px;
+    font-weight:600;
+    padding-bottom:10px;
+    border-bottom:1px solid var(--line);
+    margin-bottom:4px;
+  }
+  .past-note{
+    color:var(--ink-soft);
+    font-size:13px;
+    padding:10px 0;
+  }
+
+  .slot-row{
+    padding:14px 0 16px;
+    border-bottom:1px dashed var(--line);
+  }
+  .slot-row:last-child{ border-bottom:none; }
+  .slot-top{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+  }
+  .role-tag{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    font-weight:600;
+    font-size:15px;
+  }
+  .dot{
+    width:9px;height:9px;border-radius:50%;
+    flex:none;
+  }
+  .slot-time{
+    color:var(--ink-soft);
+    font-size:13.5px;
+  }
+  .fill-status{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .fill-status.full{ color:var(--sage); font-weight:600; }
+  .fill-status.mine{ color:var(--slate); font-weight:600; }
+
+  .capacity-dots{ display:flex; gap:4px; margin-top:6px; }
+  .capacity-dots span{
+    width:7px;height:7px;border-radius:50%;
+    background:var(--line);
+  }
+  .capacity-dots span.on{ background:var(--gold); }
+
+  .names{
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+    margin-top:10px;
+  }
+  .chip{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    background:var(--paper);
+    border:1px solid var(--line);
+    border-radius:100px;
+    padding:4px 11px;
+    font-size:13px;
+  }
+  .chip.mine{ background:var(--white); border-color:var(--slate); padding-right:6px; }
+  .chip button{
+    background:none;
+    border:none;
+    color:var(--ink-soft);
+    cursor:pointer;
+    font-size:13px;
+    line-height:1;
+    padding:2px 4px;
+    border-radius:50%;
+  }
+  .chip button:hover{ color:var(--danger); }
+  .chip.confirming{ background:var(--white); border-color:var(--danger); }
+  .confirm-inline{
+    display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-soft);
+  }
+  .confirm-inline button{
+    border:none; background:none; cursor:pointer; font-weight:600; font-size:12.5px; padding:0;
+  }
+  .confirm-inline .yes{ color:var(--danger); }
+  .confirm-inline .no{ color:var(--ink-soft); text-decoration:underline; }
+
+  .signup-btn{
+    margin-top:10px;
+    background:var(--ink);
+    color:var(--white);
+    border:none;
+    padding:8px 16px;
+    border-radius:5px;
+    font-size:13.5px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  .signup-btn:hover{ background:#3a4358; }
+  .signup-btn:disabled{ background:var(--line); color:var(--ink-soft); cursor:default; }
+
+  .inline-form{
+    margin-top:10px;
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  input[type=text], input[type=number], input[type=time], input[type=password], select{
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    padding:8px 10px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+  }
+  input[type=text]:focus, input[type=number]:focus, input[type=time]:focus, input[type=password]:focus, select:focus{
+    outline:2px solid var(--slate);
+    outline-offset:1px;
+  }
+  .inline-form input[type=text]{ flex:1; min-width:140px; }
+
+  .btn{
+    background:var(--ink);
+    color:var(--white);
+    border:none;
+    padding:8px 14px;
+    border-radius:5px;
+    font-size:13.5px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  .btn:hover{ background:#3a4358; }
+  .btn.secondary{
+    background:none;
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  .btn.secondary:hover{ border-color:var(--ink-soft); }
+  .btn.danger{ background:var(--danger); }
+  .btn.danger:hover{ background:#8a3d35; }
+  .btn:disabled{ background:var(--line); color:var(--ink-soft); cursor:default; }
+
+  .empty{
+    padding:40px 10px;
+    text-align:center;
+    color:var(--ink-soft);
+    font-size:14.5px;
+    border-top:1px solid var(--line);
+    margin-top:20px;
+  }
+
+  /* ---- admin ---- */
+  .admin-section{ margin-bottom:36px; }
+  .admin-section h2{
+    font-family:'Source Serif 4', serif;
+    font-size:20px;
+    font-weight:600;
+    margin:0 0 4px;
+  }
+  .admin-section .sub{
+    color:var(--ink-soft);
+    font-size:13.5px;
+    margin:0 0 14px;
+  }
+  .form-error{
+    color:var(--danger);
+    font-size:13px;
+    margin:2px 0 10px;
+  }
+  .field-row{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    align-items:center;
+    margin-bottom:10px;
+  }
+  .field-row label{
+    font-size:13px;
+    color:var(--ink-soft);
+    display:block;
+    margin-bottom:4px;
+  }
+  .field{ display:flex; flex-direction:column; }
+
+  .role-list, .slot-list, .user-list{ margin-top:14px; }
+  .role-item, .slot-item, .user-item{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:10px 0;
+    border-bottom:1px solid var(--line);
+    font-size:14px;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .role-item .left, .slot-item .left, .user-item .left{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .user-item .left{ flex-direction:column; align-items:flex-start; gap:1px; }
+  .user-item .uname{ color:var(--ink-soft); font-size:12.5px; }
+  .row-actions{ display:flex; gap:12px; align-items:center; }
+  .swatch{
+    width:14px;height:14px;border-radius:50%;flex:none;
+  }
+  .color-picker{ display:flex; gap:6px; }
+  .color-picker button{
+    width:22px;height:22px;border-radius:50%;
+    border:2px solid transparent;
+    cursor:pointer;
+  }
+  .color-picker button.selected{ border-color:var(--ink); }
+
+  .credential-banner{
+    background:var(--gold-soft);
+    border:1px solid var(--gold);
+    border-radius:6px;
+    padding:12px 14px;
+    font-size:13.5px;
+    margin-bottom:16px;
+    line-height:1.6;
+  }
+  .credential-banner strong{ font-weight:700; }
+  .credential-banner .dismiss{
+    margin-top:8px;
+  }
+
+  .auth-box{
+    max-width:340px;
+    margin:50px auto;
+    text-align:center;
+  }
+  .auth-box h2{
+    font-family:'Source Serif 4', serif;
+    font-size:22px;
+    margin-bottom:4px;
+  }
+  .auth-box p{ color:var(--ink-soft); font-size:14px; margin-bottom:18px;}
+  .auth-box .field{ text-align:left; }
+  .auth-box input.wide{ width:100%; text-align:left; letter-spacing:normal; }
+  .auth-error{ color:var(--danger); font-size:13px; margin-top:8px; min-height:18px; }
+  .auth-success{ color:var(--sage); font-size:13px; margin-top:8px; }
+
+  .loading{ text-align:center; padding:60px 0; color:var(--ink-soft); font-size:14px; }
+  .small-link{
+    background:none; border:none; color:var(--ink-soft); text-decoration:underline;
+    cursor:pointer; font-size:12.5px; padding:0; font-family:'Inter',sans-serif;
+  }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="loading">Loading schedule…</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// --- Paste your Supabase project details here (Project Settings > API) ---
+const SUPABASE_URL = 'https://owyvjdvapgjycwmktmcq.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_hGU88JRIZTxoELSqWiTmDw_rYyPY5CC';
+const sb = (SUPABASE_URL.startsWith('http'))
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+const PALETTE = ['#B8862E','#4C6B8A','#5B7A5B','#A24C42','#7A5B9C','#3D7A78'];
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const DOW_SHORT = ['S','M','T','W','T','F','S'];
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const TOKEN_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+
+const today = new Date(); today.setHours(0,0,0,0);
+
+let state = {
+  loaded:false,
+  view:'login', // login | setup | recover | changepass | signup | admin
+  churchName:'Our Church',
+  roles:[],
+  slots:[],
+  signups:{}, // key -> [{userId, name}]
+  users:[], // {id, name, username, salt, hash, recovery, isAdmin}
+  currentUser:null, // {id, name, username, isAdmin} -- session only, not persisted
+
+  calendarMonth:new Date(today.getFullYear(), today.getMonth(), 1),
+  selectedDate:new Date(today),
+  openSignupFor:null,
+  confirmTarget:null,
+
+  loginUsername:'', loginPassword:'', loginError:'',
+  setupName:'', setupUsername:'', setupPassword:'', setupError:'',
+  recoverUsername:'', recoverCode:'', recoverNewPassword:'', recoverError:'', recoverSuccess:'',
+  cpCurrent:'', cpNew:'', cpError:'', cpSuccess:'',
+
+  newRoleName:'', newRoleColor:PALETTE[0],
+  newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3},
+  slotFormError:'',
+  newChurchName:'',
+  newUserName:'', newUserUsername:'', newUserPassword:'', newUserIsAdmin:false, userFormError:'',
+  resetPasswordFor:null, resetPasswordDraft:'', resetPasswordError:'',
+  lastCreated:null, lastReset:null,
+  knownPasswords:{} // userId -> plaintext password, session-only, populated on create/reset
+};
+
+// Storage layer: reads/writes a single row per key in the `kv_store` table.
 // (The `shared` parameter is kept so no call sites had to change; this app
 // only ever uses shared=true data — there's no private per-visitor storage.)
 async function safeGet(key, shared){
