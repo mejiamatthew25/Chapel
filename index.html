@@ -600,6 +600,24 @@ async function fetchAll(){
     state.churchName = (settingsRes.data && settingsRes.data.church_name) || 'Our Church';
     state.profiles = profilesRes.data || [];
     state.profile = myProfileRes.data || null;
+
+    // Self-heal: a signed-in user with no matching `profiles` row (e.g. an
+    // account created before the signup trigger existed) would otherwise
+    // hang forever on "Loading your profile…". Create the missing row here.
+    if(!state.profile){
+      const isFirst = state.profiles.length === 0;
+      const fallbackName = (state.session.user.user_metadata && state.session.user.user_metadata.name)
+        || (state.session.user.email ? state.session.user.email.split('@')[0] : 'Volunteer');
+      const { data: created, error: createErr } = await sb.from('profiles')
+        .insert({ id: state.session.user.id, name: fallbackName, is_admin: isFirst })
+        .select('id, name, is_admin')
+        .single();
+      if(createErr) throw createErr;
+      state.profile = created;
+      state.profiles.push(created);
+      state.profiles.sort((a,b)=>a.name.localeCompare(b.name));
+    }
+
     state.errorBanner = null;
   }catch(e){
     showError(e, 'Could not load the schedule from the database.');
@@ -1210,7 +1228,7 @@ function render(){
   else if(state.view==='reset') body = renderReset();
   else if(state.view==='changepass') body = renderChangePass();
   else if(state.session && state.profile) body = renderSignupView();
-  else body = `<div class="loading">Loading your profile…</div>`;
+  else body = state.errorBanner ? '' : `<div class="loading">Loading your profile…</div>`;
 
   app.innerHTML = `
     <header class="top">
