@@ -556,6 +556,7 @@ function isoDate(d){
 }
 function sameDate(a,b){ return isoDate(a)===isoDate(b); }
 function fmtDateLong(d){ return d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' }); }
+function fmtDateWithYear(d){ return d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' }); }
 
 function roleById(id){ return state.roles.find(r=>r.id===id); }
 function profileById(id){ return state.profiles.find(p=>p.id===id); }
@@ -1025,6 +1026,66 @@ function renderSignupView(){
   return renderCalendar() + renderDayPanel();
 }
 
+// ---------- MY SIGN-UPS ----------
+
+function renderMySignups(){
+  const myId = state.session.user.id;
+  const todayIso = isoDate(today);
+
+  const mine = state.signups
+    .filter(s=>s.user_id===myId && s.signup_date >= todayIso)
+    .map(s=>{
+      const slot = state.slots.find(x=>x.id===s.slot_id);
+      const role = slot ? roleById(slot.role_id) : null;
+      return { signup:s, slot, role };
+    })
+    .filter(x=>x.slot && x.role)
+    .sort((a,b)=> a.signup.signup_date.localeCompare(b.signup.signup_date) || a.slot.start_time.localeCompare(b.slot.start_time));
+
+  if(mine.length === 0){
+    return `
+      <div class="empty">
+        You have no upcoming volunteer commitments.
+        <div style="margin-top:14px"><button class="btn secondary" onclick="goSignup()">Go to the schedule</button></div>
+      </div>`;
+  }
+
+  return mine.map(({signup, slot, role})=>{
+    const d = parseIsoLocal(signup.signup_date);
+    const menuKey = `cal:${slot.id}__${signup.signup_date}`;
+    const menuOpen = state.calendarMenuFor === menuKey;
+    const gcalUrl = buildGoogleCalendarUrl(role, slot, d, signup.note);
+    const ctarget = `signup:${signup.id}`;
+
+    const cancelHtml = state.confirmTarget===ctarget
+      ? `<span class="confirm-inline">Cancel this sign-up?
+           <button class="yes" onclick="removeSignup('${signup.id}')">Yes</button>
+           <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+         </span>`
+      : `<button class="small-link" onclick="askRemoveSignup('${ctarget}')">Cancel sign-up</button>`;
+
+    return `
+      <div class="slot-row">
+        <div class="day-panel-heading" style="font-size:15px; border:none; padding-bottom:2px; margin-bottom:6px;">${fmtDateWithYear(d)}</div>
+        <div class="slot-top">
+          <div class="role-tag"><span class="dot" style="background:${role.color}"></span>${escapeHtml(role.name)}</div>
+        </div>
+        <div class="slot-time">${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}</div>
+        ${signup.note ? `<div class="past-note" style="padding:4px 0 0">Note: ${escapeHtml(signup.note)}</div>` : ''}
+        <div class="cal-export">
+          <button class="small-link" onclick="toggleCalendarMenu('${menuKey}')">Add to calendar ${menuOpen ? '▴' : '▾'}</button>
+          ${menuOpen ? `
+            <div class="cal-export-menu">
+              <a href="${gcalUrl}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+              <button onclick="triggerICSDownload('${slot.id}','${signup.signup_date}')">Download iCal (.ics)</button>
+            </div>
+          ` : ''}
+        </div>
+        <div style="margin-top:8px">${cancelHtml}</div>
+      </div>`;
+  }).join('');
+}
+
 // ---------- AUTH VIEWS ----------
 
 function renderLogin(){
@@ -1334,6 +1395,12 @@ function goSignup(){
   state.confirmTarget = null;
   render();
 }
+function goMySignups(){
+  if(!state.session) return;
+  state.view = 'my-signups';
+  state.confirmTarget = null;
+  render();
+}
 
 function render(){
   const app = document.getElementById('app');
@@ -1343,7 +1410,7 @@ function render(){
     return;
   }
 
-  if((state.view==='signup' || state.view==='changepass') && !state.session){
+  if((state.view==='signup' || state.view==='changepass' || state.view==='my-signups') && !state.session){
     state.view = 'login';
   }
   if(state.view==='admin' && (!state.profile || !state.profile.is_admin)){
@@ -1355,32 +1422,23 @@ function render(){
 
   let navHtml = '';
   if(!isBare && state.session && state.profile){
-    if(state.view==='admin'){
-      navHtml = `
-        <div class="nav-side">
-          <span class="whoami">Signed in as ${escapeHtml(state.profile.name)}</span>
-          <div class="nav-links">
-            <button class="navlink" onclick="goSignup()">View sign-up sheet</button>
-            <button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>
-            <button class="navlink" onclick="logout()">Sign out</button>
-          </div>
-        </div>`;
-    } else {
-      navHtml = `
-        <div class="nav-side">
-          <span class="whoami">Signed in as ${escapeHtml(state.profile.name)}</span>
-          <div class="nav-links">
-            ${state.profile.is_admin ? `<button class="navlink" onclick="goAdmin()">Admin</button>` : ''}
-            <button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>
-            <button class="navlink" onclick="logout()">Sign out</button>
-          </div>
-        </div>`;
-    }
+    const links = [];
+    if(state.view !== 'signup') links.push(`<button class="navlink" onclick="goSignup()">Schedule</button>`);
+    if(state.view !== 'my-signups') links.push(`<button class="navlink" onclick="goMySignups()">My Sign-Ups</button>`);
+    if(state.profile.is_admin && state.view !== 'admin') links.push(`<button class="navlink" onclick="goAdmin()">Admin</button>`);
+    links.push(`<button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>`);
+    links.push(`<button class="navlink" onclick="logout()">Sign out</button>`);
+    navHtml = `
+      <div class="nav-side">
+        <span class="whoami">Signed in as ${escapeHtml(state.profile.name)}</span>
+        <div class="nav-links">${links.join('')}</div>
+      </div>`;
   }
 
-  const heading = state.view==='admin'
-    ? `<div class="titleblock"><h1>Admin</h1><p>Manage roles, slots, and volunteers</p></div>`
-    : `<div class="titleblock"><h1>${escapeHtml(state.churchName)}</h1><p>Volunteer sign-up</p></div>`;
+  const headingText = state.view==='admin' ? ['Admin','Manage roles, slots, and volunteers']
+    : state.view==='my-signups' ? ['My Sign-Ups','Your upcoming volunteer commitments']
+    : [state.churchName, 'Volunteer sign-up'];
+  const heading = `<div class="titleblock"><h1>${escapeHtml(headingText[0])}</h1><p>${escapeHtml(headingText[1])}</p></div>`;
 
   const errorHtml = state.errorBanner
     ? `<div class="error-banner"><span>${escapeHtml(state.errorBanner)}</span><button onclick="state.errorBanner=null; render()">Dismiss</button></div>`
@@ -1393,6 +1451,7 @@ function render(){
   else if(state.view==='forgot') body = renderForgot();
   else if(state.view==='reset') body = renderReset();
   else if(state.view==='changepass') body = renderChangePass();
+  else if(state.view==='my-signups' && state.session && state.profile) body = renderMySignups();
   else if(state.session && state.profile) body = renderSignupView();
   else body = state.errorBanner ? '' : `<div class="loading">Loading your profile…</div>`;
 
