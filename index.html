@@ -169,8 +169,22 @@
     box-shadow:inset 0 0 0 1px var(--ink);
   }
   .cal-cell.has-slots:hover{ border-color:var(--ink-soft); }
+  .cal-cell.past{
+    background:var(--paper);
+    opacity:0.45;
+    cursor:not-allowed;
+    pointer-events:none;
+  }
   .cal-dots{ display:flex; gap:3px; flex-wrap:wrap; }
-  .cal-dots span{ width:6px;height:6px;border-radius:50%; }
+  .cal-dots span{ width:6px;height:6px;border-radius:50%; position:relative; }
+  .cal-dots span.full::after{
+    content:'';
+    position:absolute;
+    top:50%; left:-1.5px; right:-1.5px;
+    height:1.5px;
+    background:var(--ink);
+    transform:translateY(-50%) rotate(-45deg);
+  }
   .cal-dots .more{ font-size:9.5px; color:var(--ink-soft); }
 
   @media (max-width:420px){
@@ -228,6 +242,33 @@
   }
   .fill-status.full{ color:var(--sage); font-weight:600; }
   .fill-status.mine{ color:var(--slate); font-weight:600; }
+
+  .cal-export{ margin-top:6px; }
+  .cal-export-menu{
+    margin-top:6px;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+    border:1px solid var(--line);
+    border-radius:6px;
+    background:var(--white);
+    padding:6px;
+    max-width:220px;
+  }
+  .cal-export-menu a, .cal-export-menu button{
+    display:block;
+    text-align:left;
+    background:none;
+    border:none;
+    color:var(--ink);
+    text-decoration:none;
+    font-family:'Inter',sans-serif;
+    font-size:13px;
+    padding:7px 8px;
+    border-radius:4px;
+    cursor:pointer;
+  }
+  .cal-export-menu a:hover, .cal-export-menu button:hover{ background:var(--paper); }
 
   .capacity-dots{ display:flex; gap:4px; margin-top:6px; }
   .capacity-dots span{
@@ -482,6 +523,7 @@ let state = {
   calendarMonth:new Date(today.getFullYear(), today.getMonth(), 1),
   selectedDate:new Date(today),
   confirmTarget:null,
+  calendarMenuFor:null,
   slotActionError:'',
   errorBanner:null,
 
@@ -741,6 +783,92 @@ async function removeSignup(id){
   render();
 }
 
+// ---------- CALENDAR EXPORT (Google Calendar / iCal) ----------
+
+function toggleCalendarMenu(key){
+  state.calendarMenuFor = (state.calendarMenuFor === key) ? null : key;
+  render();
+}
+
+function gcalDateStr(dateObj, timeStr){
+  const [h,m] = timeStr.split(':').map(Number);
+  const y = dateObj.getFullYear(), mo = String(dateObj.getMonth()+1).padStart(2,'0'), da = String(dateObj.getDate()).padStart(2,'0');
+  return `${y}${mo}${da}T${String(h).padStart(2,'0')}${String(m).padStart(2,'0')}00`;
+}
+function buildGoogleCalendarUrl(role, slot, dateObj, note){
+  const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+  const start = gcalDateStr(dateObj, slot.start_time);
+  const end = gcalDateStr(dateObj, slot.end_time);
+  const title = `${role.name} — ${state.churchName}`;
+  let details = `Volunteering as ${role.name} for ${state.churchName}.`;
+  if(note) details += `\n\nNote: ${note}`;
+  const params = new URLSearchParams({
+    action:'TEMPLATE',
+    text:title,
+    dates:`${start}/${end}`,
+    details,
+    location:state.churchName,
+    ctz:tz
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function icsDateStr(dateObj, timeStr){
+  const [h,m] = timeStr.split(':').map(Number);
+  const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate(), h, m, 0);
+  return dt.toISOString().replace(/[-:]/g,'').split('.')[0] + 'Z';
+}
+function escapeICS(s){
+  return String(s||'').replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n');
+}
+function downloadICS(role, slot, dateObj, note){
+  const iso = isoDate(dateObj);
+  const dtStart = icsDateStr(dateObj, slot.start_time);
+  const dtEnd = icsDateStr(dateObj, slot.end_time);
+  const dtStamp = new Date().toISOString().replace(/[-:]/g,'').split('.')[0] + 'Z';
+  const summary = escapeICS(`${role.name} — ${state.churchName}`);
+  let descriptionText = `Volunteering as ${role.name} for ${state.churchName}.`;
+  if(note) descriptionText += `\n\nNote: ${note}`;
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Volunteer Sign-Up//EN',
+    'CALSCALE:GREGORIAN',
+    'BEGIN:VEVENT',
+    `UID:${slot.id}-${iso}@volunteer-signup`,
+    `DTSTAMP:${dtStamp}`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${summary}`,
+    `DESCRIPTION:${escapeICS(descriptionText)}`,
+    `LOCATION:${escapeICS(state.churchName)}`,
+    'END:VEVENT',
+    'END:VCALENDAR'
+  ].join('\r\n');
+  const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${role.name.replace(/[^a-z0-9]+/gi,'-')}-${iso}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function parseIsoLocal(iso){
+  const [y,m,dd] = iso.split('-').map(Number);
+  return new Date(y, m-1, dd);
+}
+function triggerICSDownload(slotId, iso){
+  const slot = state.slots.find(s=>s.id===slotId);
+  if(!slot) return;
+  const role = roleById(slot.role_id);
+  if(!role) return;
+  const mySignup = state.signups.find(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===state.session.user.id);
+  downloadICS(role, slot, parseIsoLocal(iso), mySignup ? mySignup.note : '');
+}
+
 function renderCalendar(){
   const cm = state.calendarMonth;
   const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
@@ -751,17 +879,24 @@ function renderCalendar(){
 
   for(let day=1; day<=numDays; day++){
     const d = new Date(cm.getFullYear(), cm.getMonth(), day);
+    const iso = isoDate(d);
     const daySlots = slotsForDate(d);
     const isToday = sameDate(d, today);
     const isSelected = sameDate(d, state.selectedDate);
+    const isPast = d < today;
     const uniqueRoles = [...new Map(daySlots.map(x=>[x.role.id,x.role])).values()];
     const shown = uniqueRoles.slice(0,4);
     const extra = uniqueRoles.length - shown.length;
-    const dots = shown.map(r=>`<span style="background:${r.color}"></span>`).join('') + (extra>0?`<span class="more">+${extra}</span>`:'');
+    const dots = shown.map(r=>{
+      // A role is "full" for the day once every one of its slot instances that day has hit capacity.
+      const roleSlots = daySlots.filter(x=>x.role.id===r.id);
+      const isFull = roleSlots.every(x=>signupsFor(x.slot.id, iso).length >= x.slot.capacity);
+      return `<span class="${isFull?'full':''}" style="background:${r.color}" title="${escapeAttr(r.name)}${isFull?' — full':''}"></span>`;
+    }).join('') + (extra>0?`<span class="more">+${extra}</span>`:'');
 
     cells += `
-      <button type="button" class="cal-cell ${isToday?'today':''} ${isSelected?'selected':''} ${daySlots.length?'has-slots':''}"
-        onclick="selectDate(${cm.getFullYear()},${cm.getMonth()},${day})">
+      <button type="button" class="cal-cell ${isToday?'today':''} ${isSelected?'selected':''} ${daySlots.length?'has-slots':''} ${isPast?'past':''}"
+        onclick="selectDate(${cm.getFullYear()},${cm.getMonth()},${day})" ${isPast?'disabled':''}>
         <span class="num">${day}</span>
         <span class="cal-dots">${dots}</span>
       </button>`;
@@ -822,7 +957,20 @@ function renderDayPanel(){
       let actionHtml = '';
       if(!isPast){
         if(mine){
-          actionHtml = `<div style="margin-top:8px" class="fill-status mine">You're signed up for this.</div>`;
+          const menuKey = `cal:${slot.id}__${iso}`;
+          const gcalUrl = buildGoogleCalendarUrl(role, slot, d, mine.note);
+          const menuOpen = state.calendarMenuFor === menuKey;
+          actionHtml = `
+            <div style="margin-top:8px" class="fill-status mine">You're signed up for this.</div>
+            <div class="cal-export">
+              <button class="small-link" onclick="toggleCalendarMenu('${menuKey}')">Add to calendar ${menuOpen ? '▴' : '▾'}</button>
+              ${menuOpen ? `
+                <div class="cal-export-menu">
+                  <a href="${gcalUrl}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+                  <button onclick="triggerICSDownload('${slot.id}','${iso}')">Download iCal (.ics)</button>
+                </div>
+              ` : ''}
+            </div>`;
         } else {
           actionHtml = `<button class="signup-btn" ${isFull?'disabled':''} onclick="submitSignup('${slot.id}','${iso}',${cap})">${isFull?'Full':'Sign up'}</button>`;
         }
