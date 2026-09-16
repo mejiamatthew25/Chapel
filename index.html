@@ -524,6 +524,8 @@ let state = {
   selectedDate:new Date(today),
   confirmTarget:null,
   calendarMenuFor:null,
+  openSignupFor:null,
+  noteDraft:'',
   slotActionError:'',
   errorBanner:null,
 
@@ -646,7 +648,7 @@ async function fetchAll(){
     const [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes] = await Promise.all([
       sb.from('roles').select('*').order('name'),
       sb.from('slots').select('*'),
-      sb.from('signups').select('id, slot_id, user_id, signup_date'),
+      sb.from('signups').select('id, slot_id, user_id, signup_date, note'),
       sb.from('church_settings').select('church_name').maybeSingle(),
       sb.from('profiles').select('id, name, is_admin').order('name'),
       sb.from('profiles').select('id, name, is_admin').eq('id', state.session.user.id).maybeSingle()
@@ -779,17 +781,32 @@ function selectDate(y,m,day){
   render();
 }
 
+function openSignupForm(key){
+  state.openSignupFor = key;
+  state.noteDraft = '';
+  state.slotActionError = '';
+  render();
+}
+function closeSignupForm(){
+  state.openSignupFor = null;
+  state.noteDraft = '';
+  render();
+}
+
 async function submitSignup(slotId, iso, capacity){
   state.slotActionError = '';
   const myId = state.session.user.id;
   if(state.signups.some(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===myId)) return;
   if(signupsFor(slotId, iso).length >= capacity) return; // fast client-side check; the database is the real guard
+  const note = (state.noteDraft || '').trim() || null;
   const { data, error } = await sb.from('signups')
-    .insert({ slot_id: slotId, user_id: myId, signup_date: iso })
-    .select('id, slot_id, user_id, signup_date')
+    .insert({ slot_id: slotId, user_id: myId, signup_date: iso, note })
+    .select('id, slot_id, user_id, signup_date, note')
     .single();
   if(error){ state.slotActionError = error.message; render(); return; }
   state.signups.push(data);
+  state.openSignupFor = null;
+  state.noteDraft = '';
   render();
 }
 function askRemoveSignup(target){ state.confirmTarget = target; render(); }
@@ -950,6 +967,7 @@ function renderDayPanel(){
     if(isPast) inner += `<p class="past-note">This date has passed.</p>`;
     inner += daySlots.map(({slot, role})=>{
       const iso = isoDate(d);
+      const instKey = `${slot.id}__${iso}`;
       const filled = signupsFor(slot.id, iso);
       const cap = slot.capacity;
       const isFull = filled.length >= cap;
@@ -959,7 +977,9 @@ function renderDayPanel(){
       const namesHtml = filled.length ? `<div class="names">${filled.map(e=>{
         const isMine = e.user_id===myId;
         const name = profileName(e.user_id);
-        if(!isMine) return `<span class="chip">${escapeHtml(name)}</span>`;
+        const noteAttr = e.note ? ` title="${escapeAttr(e.note)}"` : '';
+        const noteIcon = e.note ? ' <span aria-hidden="true">📝</span>' : '';
+        if(!isMine) return `<span class="chip"${noteAttr}>${escapeHtml(name)}${noteIcon}</span>`;
         const ctarget = `signup:${e.id}`;
         if(state.confirmTarget===ctarget){
           return `<span class="chip confirming">${escapeHtml(name)}
@@ -969,7 +989,7 @@ function renderDayPanel(){
             </span>
           </span>`;
         }
-        return `<span class="chip mine">${escapeHtml(name)}<button title="Cancel" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+        return `<span class="chip mine"${noteAttr}>${escapeHtml(name)}${noteIcon}<button title="Cancel" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
       }).join('')}</div>` : '';
 
       let actionHtml = '';
@@ -989,8 +1009,17 @@ function renderDayPanel(){
                 </div>
               ` : ''}
             </div>`;
+        } else if(state.openSignupFor === instKey){
+          actionHtml = `
+            <div class="inline-form" style="flex-direction:column; align-items:stretch;">
+              <input type="text" placeholder="Notes or special requests (optional)" value="${escapeAttr(state.noteDraft)}" oninput="state.noteDraft=this.value" onkeydown="if(event.key==='Enter'){submitSignup('${slot.id}','${iso}',${cap})}">
+              <div style="display:flex; gap:8px;">
+                <button class="btn" onclick="submitSignup('${slot.id}','${iso}',${cap})">Confirm sign-up</button>
+                <button class="btn secondary" onclick="closeSignupForm()">Cancel</button>
+              </div>
+            </div>`;
         } else {
-          actionHtml = `<button class="signup-btn" ${isFull?'disabled':''} onclick="submitSignup('${slot.id}','${iso}',${cap})">${isFull?'Full':'Sign up'}</button>`;
+          actionHtml = `<button class="signup-btn" ${isFull?'disabled':''} onclick="openSignupForm('${instKey}')">${isFull?'Full':'Sign up'}</button>`;
         }
       }
 
