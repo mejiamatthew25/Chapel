@@ -10,7 +10,7 @@
   :root{
     --ink:#16311F;
     --ink-soft:#5B6B5D;
-    --paper:#F6F3EA;
+    --paper:#FFFFFF;
     --white:#FFFFFF;
     --line:#DCD5C0;
     --gold:#1B4D2E;
@@ -63,7 +63,41 @@
     color:var(--ink-soft);
     white-space:nowrap;
   }
-  .nav-links{ display:flex; gap:10px; }
+  .tabbar{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px 16px;
+    padding-bottom:14px;
+    margin-bottom:24px;
+    border-bottom:1px solid var(--line);
+  }
+  .tabbar .whoami{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .tabs{ display:flex; flex-wrap:wrap; gap:6px; }
+  .tab{
+    background:none;
+    border:1px solid transparent;
+    font-family:'Inter',sans-serif;
+    font-size:13.5px;
+    font-weight:600;
+    color:var(--ink-soft);
+    cursor:pointer;
+    padding:8px 14px;
+    border-radius:100px;
+    white-space:nowrap;
+  }
+  .tab:hover{ color:var(--ink); border-color:var(--line); }
+  .tab.active{
+    background:var(--gold-soft);
+    color:var(--ink);
+  }
+  .tab.signout{ color:var(--danger); }
+  .tab.signout:hover{ color:#7A362E; border-color:#F0D8D4; }
   .navlink{
     background:none;
     border:none;
@@ -170,8 +204,8 @@
   }
   .cal-cell.has-slots:hover{ border-color:var(--ink-soft); }
   .cal-cell.past{
-    background:var(--paper);
-    opacity:0.45;
+    background:var(--gold-soft);
+    opacity:0.6;
     cursor:not-allowed;
     pointer-events:none;
   }
@@ -241,7 +275,14 @@
     white-space:nowrap;
   }
   .fill-status.full{ color:var(--sage); font-weight:600; }
-  .fill-status.mine{ color:var(--slate); font-weight:600; }
+  .fill-status.mine{
+    color:var(--ink);
+    font-weight:600;
+    display:inline-block;
+    background:var(--gold-soft);
+    padding:4px 10px;
+    border-radius:100px;
+  }
 
   .cal-export{ margin-top:6px; }
   .cal-export-menu{
@@ -268,7 +309,7 @@
     border-radius:4px;
     cursor:pointer;
   }
-  .cal-export-menu a:hover, .cal-export-menu button:hover{ background:var(--paper); }
+  .cal-export-menu a:hover, .cal-export-menu button:hover{ background:var(--gold-soft); }
 
   .capacity-dots{ display:flex; gap:4px; margin-top:6px; }
   .capacity-dots span{
@@ -287,7 +328,7 @@
     display:flex;
     align-items:center;
     gap:6px;
-    background:var(--paper);
+    background:var(--gold-soft);
     border:1px solid var(--line);
     border-radius:100px;
     padding:4px 11px;
@@ -1451,16 +1492,20 @@ function render(){
 
   let navHtml = '';
   if(!isBare && state.session && state.profile){
-    const links = [];
-    if(state.view !== 'signup') links.push(`<button class="navlink" onclick="goSignup()">Schedule</button>`);
-    if(state.view !== 'my-signups') links.push(`<button class="navlink" onclick="goMySignups()">My Sign-Ups</button>`);
-    if(state.profile.is_admin && state.view !== 'admin') links.push(`<button class="navlink" onclick="goAdmin()">Admin</button>`);
-    links.push(`<button class="navlink" onclick="state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()">Change password</button>`);
-    links.push(`<button class="navlink" onclick="logout()">Sign out</button>`);
+    const tabs = [
+      { key:'signup', label:'Schedule', onclick:'goSignup()' },
+      { key:'my-signups', label:'My Sign-Ups', onclick:'goMySignups()' }
+    ];
+    if(state.profile.is_admin) tabs.push({ key:'admin', label:'Admin', onclick:'goAdmin()' });
+    tabs.push({ key:'changepass', label:'Change password', onclick:"state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()" });
+
+    const tabsHtml = tabs.map(t=>`<button class="tab ${state.view===t.key?'active':''}" onclick="${t.onclick}">${t.label}</button>`).join('')
+      + `<button class="tab signout" onclick="logout()">Sign out</button>`;
+
     navHtml = `
-      <div class="nav-side">
+      <div class="tabbar">
         <span class="whoami">Signed in as ${escapeHtml(state.profile.name)}</span>
-        <div class="nav-links">${links.join('')}</div>
+        <div class="tabs">${tabsHtml}</div>
       </div>`;
   }
 
@@ -1487,8 +1532,8 @@ function render(){
   app.innerHTML = `
     <header class="top">
       ${heading}
-      ${navHtml}
     </header>
+    ${navHtml}
     ${errorHtml}
     ${body}
   `;
