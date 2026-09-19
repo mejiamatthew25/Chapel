@@ -679,6 +679,7 @@ let state = {
 
   newRoleName:'', newRoleColor:PALETTE[0], roleFormError:'',
   newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3}, slotFormError:'',
+  newOneOff:{roleId:'', date:'', start:'09:00', end:'10:00', capacity:3}, oneOffFormError:'',
   newChurchName:'', churchNameError:'',
   userFormError:'',
 
@@ -713,8 +714,9 @@ function profileName(id){ const p = profileById(id); return p ? p.name : '(forme
 
 function slotsForDate(d){
   const dow = d.getDay();
+  const iso = isoDate(d);
   return state.slots
-    .filter(s=>Number(s.day)===dow)
+    .filter(s => s.specific_date ? s.specific_date === iso : Number(s.day) === dow)
     .map(slot=>({ slot, role:roleById(slot.role_id) }))
     .filter(x=>!!x.role)
     .sort((a,b)=>a.slot.start_time.localeCompare(b.slot.start_time));
@@ -1546,12 +1548,30 @@ async function addSlot(){
   if(start >= end){ state.slotFormError = 'End time must be after start time.'; render(); return; }
   if(!capacity || Number(capacity) < 1){ state.slotFormError = 'Volunteers needed must be at least 1.'; render(); return; }
   const { data, error } = await sb.from('slots').insert({
-    role_id: roleId, day:Number(day), start_time:start, end_time:end, capacity:Number(capacity)
+    role_id: roleId, day:Number(day), specific_date:null, start_time:start, end_time:end, capacity:Number(capacity)
   }).select().single();
   if(error){ state.slotFormError = error.message; render(); return; }
   state.slots.push(data);
   render();
 }
+
+async function addOneOffSlot(){
+  state.oneOffFormError = '';
+  const { roleId, date, start, end, capacity } = state.newOneOff;
+  if(!roleId){ state.oneOffFormError = 'Choose a role first.'; render(); return; }
+  if(!date){ state.oneOffFormError = 'Choose a date.'; render(); return; }
+  if(!start || !end){ state.oneOffFormError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.oneOffFormError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.oneOffFormError = 'Volunteers needed must be at least 1.'; render(); return; }
+  const { data, error } = await sb.from('slots').insert({
+    role_id: roleId, day:null, specific_date:date, start_time:start, end_time:end, capacity:Number(capacity)
+  }).select().single();
+  if(error){ state.oneOffFormError = error.message; render(); return; }
+  state.slots.push(data);
+  state.newOneOff = { roleId:'', date:'', start:'09:00', end:'10:00', capacity:3 };
+  render();
+}
+
 async function deleteSlot(id){
   const { error } = await sb.from('slots').delete().eq('id', id);
   if(error){ showError(error, 'Could not delete that slot.'); state.confirmTarget=null; render(); return; }
@@ -1592,7 +1612,12 @@ function exportRosterCSV(){
 }
 
 function renderAdmin(){
-  const sortedSlots = [...state.slots].sort((a,b)=> Number(a.day)-Number(b.day) || a.start_time.localeCompare(b.start_time));
+  const sortedSlots = [...state.slots]
+    .filter(s => s.specific_date == null)
+    .sort((a,b)=> Number(a.day)-Number(b.day) || a.start_time.localeCompare(b.start_time));
+  const sortedOneOffs = [...state.slots]
+    .filter(s => s.specific_date != null)
+    .sort((a,b)=> a.specific_date.localeCompare(b.specific_date) || a.start_time.localeCompare(b.start_time));
 
   return `
     <div class="admin-section">
@@ -1717,6 +1742,58 @@ function renderAdmin(){
         <button class="btn" onclick="addSlot()" style="align-self:flex-end">Add slot</button>
       </div>
       ${state.slotFormError ? `<div class="form-error">${escapeHtml(state.slotFormError)}</div>` : ''}
+    </div>
+
+    <div class="admin-section">
+      <h2>One-off dates</h2>
+      <p class="sub">Use this for a single event that doesn't repeat, like a special service or a parish event.</p>
+      <div class="slot-list">
+        ${sortedOneOffs.length ? sortedOneOffs.map(s=>{
+          const role = roleById(s.role_id);
+          const target = `slot:${s.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">Delete?
+                 <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+          return `
+          <div class="slot-item">
+            <div class="left">
+              <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
+              ${role?escapeHtml(role.name):'(deleted role)'} — ${fmtDateWithYear(parseIsoLocal(s.specific_date))}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+            </div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No one-off dates yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.newOneOff.roleId=this.value">
+            <option value="" ${!state.newOneOff.roleId?'selected':''}>Select role</option>
+            ${state.roles.map(r=>`<option value="${r.id}" ${state.newOneOff.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Date</label>
+          <input type="date" value="${state.newOneOff.date}" oninput="state.newOneOff.date=this.value">
+        </div>
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${state.newOneOff.start}" oninput="state.newOneOff.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${state.newOneOff.end}" oninput="state.newOneOff.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${state.newOneOff.capacity}" style="width:80px" oninput="state.newOneOff.capacity=this.value">
+        </div>
+        <button class="btn" onclick="addOneOffSlot()" style="align-self:flex-end">Add one-off date</button>
+      </div>
+      ${state.oneOffFormError ? `<div class="form-error">${escapeHtml(state.oneOffFormError)}</div>` : ''}
     </div>
   `;
 }
