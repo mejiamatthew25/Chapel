@@ -28,7 +28,7 @@
     -webkit-font-smoothing:antialiased;
   }
   .wrap{
-    max-width:640px;
+    max-width:960px;
     margin:0 auto;
     padding:28px 20px 80px;
   }
@@ -434,6 +434,79 @@
     margin-top:20px;
   }
 
+  /* ---- two-column layout (schedule + announcements) ---- */
+  .page-grid{
+    display:grid;
+    grid-template-columns:1fr 300px;
+    gap:32px;
+    align-items:start;
+  }
+  .main-col{ min-width:0; }
+  .side-col{ min-width:0; }
+  @media (max-width:800px){
+    .page-grid{ grid-template-columns:1fr; }
+  }
+
+  .sidebar-card{
+    background:var(--white);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:18px;
+  }
+  .sidebar-title{
+    font-family:'Source Serif 4', serif;
+    font-size:18px;
+    font-weight:600;
+    margin:0 0 14px;
+  }
+  .announcement-card{
+    padding:14px 0;
+    border-top:1px solid var(--line);
+  }
+  .announcement-card:first-of-type{ border-top:none; padding-top:0; }
+  .announcement-title{
+    font-weight:700;
+    font-size:14.5px;
+    margin-bottom:4px;
+  }
+  .announcement-body{
+    font-size:13.5px;
+    color:var(--ink);
+    white-space:pre-wrap;
+    line-height:1.5;
+    margin-bottom:6px;
+  }
+  .announcement-meta{
+    font-size:12px;
+    color:var(--ink-soft);
+  }
+  .announcement-actions{
+    display:flex;
+    gap:12px;
+    margin-top:8px;
+  }
+  .announcement-form{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-bottom:14px;
+  }
+  .announcement-form input, .announcement-form textarea{
+    width:100%;
+    font-family:'Inter',sans-serif;
+    font-size:13.5px;
+    padding:8px 10px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+    resize:vertical;
+  }
+  .announcement-form textarea:focus, .announcement-form input:focus{
+    outline:2px solid var(--slate);
+    outline-offset:1px;
+  }
+
   /* ---- admin ---- */
   .admin-section{ margin-bottom:36px; }
   .admin-section h2{
@@ -592,7 +665,12 @@ let state = {
   newRoleName:'', newRoleColor:PALETTE[0], roleFormError:'',
   newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3}, slotFormError:'',
   newChurchName:'', churchNameError:'',
-  userFormError:''
+  userFormError:'',
+
+  announcements:[],
+  showAnnouncementForm:false,
+  newAnnouncementTitle:'', newAnnouncementBody:'', announcementFormError:'',
+  editingAnnouncementId:null, editAnnouncementTitle:'', editAnnouncementBody:'', editAnnouncementError:''
 };
 
 function uid(){ return Math.random().toString(36).slice(2,10); } // for DOM-only helper ids, not DB rows
@@ -699,15 +777,16 @@ async function loadForSession(){
 async function fetchAll(){
   if(!state.session) return;
   try{
-    const [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes] = await Promise.all([
+    const [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes, announcementsRes] = await Promise.all([
       sb.from('roles').select('*').order('name'),
       sb.from('slots').select('*'),
       sb.from('signups').select('id, slot_id, user_id, signup_date, note'),
       sb.from('church_settings').select('church_name').maybeSingle(),
       sb.from('profiles').select('id, name, is_admin').order('name'),
-      sb.from('profiles').select('id, name, is_admin').eq('id', state.session.user.id).maybeSingle()
+      sb.from('profiles').select('id, name, is_admin').eq('id', state.session.user.id).maybeSingle(),
+      sb.from('announcements').select('id, title, body, author_id, created_at').order('created_at', { ascending:false })
     ]);
-    for(const r of [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes]){
+    for(const r of [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes, announcementsRes]){
       if(r.error) throw r.error;
     }
     state.roles = rolesRes.data || [];
@@ -716,6 +795,7 @@ async function fetchAll(){
     state.churchName = (settingsRes.data && settingsRes.data.church_name) || 'Our Church';
     state.profiles = profilesRes.data || [];
     state.profile = myProfileRes.data || null;
+    state.announcements = announcementsRes.data || [];
 
     // Self-heal: a signed-in user with no matching `profiles` row (e.g. an
     // account created before the signup trigger existed) would otherwise
@@ -1099,14 +1179,169 @@ function renderDayPanel(){
   `;
 }
 
+// ---------- ANNOUNCEMENTS ----------
+
+function fmtPostedAt(iso){
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+}
+
+function openAnnouncementForm(){
+  state.showAnnouncementForm = true;
+  state.newAnnouncementTitle = '';
+  state.newAnnouncementBody = '';
+  state.announcementFormError = '';
+  render();
+}
+function closeAnnouncementForm(){
+  state.showAnnouncementForm = false;
+  state.announcementFormError = '';
+  render();
+}
+async function addAnnouncement(){
+  const title = state.newAnnouncementTitle.trim();
+  const body = state.newAnnouncementBody.trim();
+  state.announcementFormError = '';
+  if(!title){ state.announcementFormError = 'Enter a title.'; render(); return; }
+  if(!body){ state.announcementFormError = 'Enter some body text.'; render(); return; }
+  const { data, error } = await sb.from('announcements')
+    .insert({ title, body, author_id: state.session.user.id })
+    .select('id, title, body, author_id, created_at')
+    .single();
+  if(error){ state.announcementFormError = error.message; render(); return; }
+  state.announcements.unshift(data);
+  state.showAnnouncementForm = false;
+  state.newAnnouncementTitle = '';
+  state.newAnnouncementBody = '';
+  render();
+}
+
+function startEditAnnouncement(id){
+  const a = state.announcements.find(x=>x.id===id);
+  if(!a) return;
+  state.editingAnnouncementId = id;
+  state.editAnnouncementTitle = a.title;
+  state.editAnnouncementBody = a.body;
+  state.editAnnouncementError = '';
+  render();
+}
+function cancelEditAnnouncement(){
+  state.editingAnnouncementId = null;
+  state.editAnnouncementError = '';
+  render();
+}
+async function saveEditAnnouncement(id){
+  const title = state.editAnnouncementTitle.trim();
+  const body = state.editAnnouncementBody.trim();
+  state.editAnnouncementError = '';
+  if(!title){ state.editAnnouncementError = 'Enter a title.'; render(); return; }
+  if(!body){ state.editAnnouncementError = 'Enter some body text.'; render(); return; }
+  const { data, error } = await sb.from('announcements')
+    .update({ title, body })
+    .eq('id', id)
+    .select('id, title, body, author_id, created_at')
+    .single();
+  if(error){ state.editAnnouncementError = error.message; render(); return; }
+  const idx = state.announcements.findIndex(x=>x.id===id);
+  if(idx>-1) state.announcements[idx] = data;
+  state.editingAnnouncementId = null;
+  render();
+}
+async function deleteAnnouncement(id){
+  const { error } = await sb.from('announcements').delete().eq('id', id);
+  if(error){ showError(error, 'Could not delete that announcement.'); state.confirmTarget=null; render(); return; }
+  state.announcements = state.announcements.filter(a=>a.id!==id);
+  state.confirmTarget = null;
+  render();
+}
+
+function renderAnnouncementsWidget(){
+  const isAdmin = state.profile && state.profile.is_admin;
+
+  let addSection = '';
+  if(isAdmin){
+    if(state.showAnnouncementForm){
+      addSection = `
+        <div class="announcement-form">
+          <input type="text" placeholder="Title" value="${escapeAttr(state.newAnnouncementTitle)}" oninput="state.newAnnouncementTitle=this.value">
+          <textarea placeholder="Body text" rows="3" oninput="state.newAnnouncementBody=this.value">${escapeHtml(state.newAnnouncementBody)}</textarea>
+          <div class="field-row" style="margin:0">
+            <button class="btn" onclick="addAnnouncement()">Post</button>
+            <button class="btn secondary" onclick="closeAnnouncementForm()">Cancel</button>
+          </div>
+          ${state.announcementFormError ? `<div class="form-error">${escapeHtml(state.announcementFormError)}</div>` : ''}
+        </div>`;
+    } else {
+      addSection = `<button class="btn secondary" style="width:100%; margin-bottom:14px;" onclick="openAnnouncementForm()">+ Add Announcement</button>`;
+    }
+  }
+
+  let listHtml;
+  if(state.announcements.length === 0){
+    listHtml = `<p class="past-note">No current announcements.</p>`;
+  } else {
+    listHtml = state.announcements.map(a=>{
+      if(state.editingAnnouncementId === a.id){
+        return `
+          <div class="announcement-card">
+            <div class="announcement-form">
+              <input type="text" placeholder="Title" value="${escapeAttr(state.editAnnouncementTitle)}" oninput="state.editAnnouncementTitle=this.value">
+              <textarea placeholder="Body text" rows="3" oninput="state.editAnnouncementBody=this.value">${escapeHtml(state.editAnnouncementBody)}</textarea>
+              <div class="field-row" style="margin:0">
+                <button class="btn" onclick="saveEditAnnouncement('${a.id}')">Save</button>
+                <button class="btn secondary" onclick="cancelEditAnnouncement()">Cancel</button>
+              </div>
+              ${state.editAnnouncementError ? `<div class="form-error">${escapeHtml(state.editAnnouncementError)}</div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      const target = `announcement:${a.id}`;
+      const adminControls = isAdmin ? (
+        state.confirmTarget===target
+          ? `<span class="confirm-inline">Delete?
+               <button class="yes" onclick="deleteAnnouncement('${a.id}')">Yes</button>
+               <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+             </span>`
+          : `<div class="announcement-actions">
+               <button class="small-link" onclick="startEditAnnouncement('${a.id}')">Edit</button>
+               <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+             </div>`
+      ) : '';
+
+      return `
+        <div class="announcement-card">
+          <div class="announcement-title">${escapeHtml(a.title)}</div>
+          <div class="announcement-body">${escapeHtml(a.body)}</div>
+          <div class="announcement-meta">${escapeHtml(profileName(a.author_id))} · ${fmtPostedAt(a.created_at)}</div>
+          ${adminControls}
+        </div>`;
+    }).join('');
+  }
+
+  return `
+    <div class="sidebar-card">
+      <h2 class="sidebar-title">Announcements</h2>
+      ${addSection}
+      ${listHtml}
+    </div>`;
+}
+
 function renderSignupView(){
+  let mainCol;
   if(state.roles.length===0 || state.slots.length===0){
-    return `
+    mainCol = `
       <div class="empty">
         No volunteer slots have been set up yet.${state.profile && state.profile.is_admin ? ' Head to Admin to add roles and time slots.' : ' Ask your administrator to add roles and time slots.'}
       </div>`;
+  } else {
+    mainCol = renderCalendar() + renderDayPanel();
   }
-  return renderCalendar() + renderDayPanel();
+  return `
+    <div class="page-grid">
+      <div class="main-col">${mainCol}</div>
+      <div class="side-col">${renderAnnouncementsWidget()}</div>
+    </div>`;
 }
 
 // ---------- MY SIGN-UPS ----------
