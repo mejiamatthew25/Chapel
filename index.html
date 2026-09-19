@@ -335,6 +335,21 @@
     gap:6px;
     margin-top:10px;
   }
+  .note-list{
+    margin-top:8px;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+  }
+  .note-line{
+    font-size:12.5px;
+    color:var(--ink-soft);
+    line-height:1.4;
+    background:var(--gold-soft);
+    border-radius:6px;
+    padding:6px 10px;
+  }
+  .note-line strong{ color:var(--ink); font-weight:600; }
   .chip{
     display:flex;
     align-items:center;
@@ -1126,6 +1141,11 @@ function renderDayPanel(){
         return `<span class="chip mine"${noteAttr}>${escapeHtml(name)}${noteIcon}<button title="Cancel" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
       }).join('')}</div>` : '';
 
+      const withNotes = filled.filter(e=>e.note);
+      const notesHtml = withNotes.length ? `<div class="note-list">${withNotes.map(e=>
+        `<div class="note-line"><strong>${escapeHtml(profileName(e.user_id))}:</strong> ${escapeHtml(e.note)}</div>`
+      ).join('')}</div>` : '';
+
       let actionHtml = '';
       if(!isPast){
         if(mine){
@@ -1166,6 +1186,7 @@ function renderDayPanel(){
           <div class="slot-time">${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}</div>
           <div class="capacity-dots">${capDots}</div>
           ${namesHtml}
+          ${notesHtml}
           ${actionHtml}
         </div>`;
     }).join('');
