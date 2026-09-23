@@ -361,6 +361,23 @@
     font-size:13px;
   }
   .chip.mine{ background:var(--white); border-color:var(--slate); padding-right:6px; }
+  .chip.admin-removable{ background:var(--white); border-color:var(--ink-soft); padding-right:6px; }
+  .admin-assign{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+  .admin-assign select{
+    font-family:'Inter',sans-serif;
+    font-size:13px;
+    padding:7px 8px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+  }
   .chip button{
     background:none;
     border:none;
@@ -969,6 +986,25 @@ async function removeSignup(id){
   render();
 }
 
+// Admin-only: assign a specific volunteer to a slot instance on their behalf.
+async function adminAssignSignup(slotId, iso, capacity, profileId){
+  state.slotActionError = '';
+  if(!profileId){ state.slotActionError = 'Choose a volunteer to assign.'; render(); return; }
+  if(state.signups.some(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===profileId)){
+    state.slotActionError = 'That person is already signed up for this.'; render(); return;
+  }
+  if(signupsFor(slotId, iso).length >= capacity){
+    state.slotActionError = 'This slot is already full.'; render(); return;
+  }
+  const { data, error } = await sb.from('signups')
+    .insert({ slot_id: slotId, user_id: profileId, signup_date: iso, note: null })
+    .select('id, slot_id, user_id, signup_date, note')
+    .single();
+  if(error){ state.slotActionError = error.message; render(); return; }
+  state.signups.push(data);
+  render();
+}
+
 // ---------- CALENDAR EXPORT (Google Calendar / iCal) ----------
 
 function toggleCalendarMenu(key){
@@ -1107,6 +1143,7 @@ function renderDayPanel(){
   const daySlots = slotsForDate(d);
   const isPast = d < today;
   const myId = state.session.user.id;
+  const isAdminViewer = !!(state.profile && state.profile.is_admin);
 
   let inner = '';
   if(state.slotActionError){
@@ -1127,20 +1164,22 @@ function renderDayPanel(){
 
       const namesHtml = filled.length ? `<div class="names">${filled.map(e=>{
         const isMine = e.user_id===myId;
+        const canRemove = isMine || isAdminViewer;
         const name = profileName(e.user_id);
         const noteAttr = e.note ? ` title="${escapeAttr(e.note)}"` : '';
         const noteIcon = e.note ? ' <span aria-hidden="true">📝</span>' : '';
-        if(!isMine) return `<span class="chip"${noteAttr}>${escapeHtml(name)}${noteIcon}</span>`;
+        if(!canRemove) return `<span class="chip"${noteAttr}>${escapeHtml(name)}${noteIcon}</span>`;
         const ctarget = `signup:${e.id}`;
         if(state.confirmTarget===ctarget){
           return `<span class="chip confirming">${escapeHtml(name)}
-            <span class="confirm-inline">Cancel?
+            <span class="confirm-inline">${isMine?'Cancel?':'Remove?'}
               <button class="yes" onclick="removeSignup('${e.id}')">Yes</button>
               <button class="no" onclick="state.confirmTarget=null; render()">No</button>
             </span>
           </span>`;
         }
-        return `<span class="chip mine"${noteAttr}>${escapeHtml(name)}${noteIcon}<button title="Cancel" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+        const chipClass = isMine ? 'chip mine' : 'chip admin-removable';
+        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
       }).join('')}</div>` : '';
 
       const withNotes = filled.filter(e=>e.note);
@@ -1179,6 +1218,23 @@ function renderDayPanel(){
         }
       }
 
+      let adminAssignHtml = '';
+      if(isAdminViewer && !isPast && !isFull){
+        const assignId = `assign-${instKey}`;
+        const alreadyIds = new Set(filled.map(e=>e.user_id));
+        const options = state.profiles
+          .filter(p=>!alreadyIds.has(p.id))
+          .map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+        adminAssignHtml = `
+          <div class="admin-assign">
+            <select id="${assignId}">
+              <option value="">Assign a volunteer…</option>
+              ${options}
+            </select>
+            <button class="small-link" onclick="adminAssignSignup('${slot.id}','${iso}',${cap}, document.getElementById('${assignId}').value)">Add</button>
+          </div>`;
+      }
+
       return `
         <div class="slot-row">
           <div class="slot-top">
@@ -1190,6 +1246,7 @@ function renderDayPanel(){
           ${namesHtml}
           ${notesHtml}
           ${actionHtml}
+          ${adminAssignHtml}
         </div>`;
     }).join('');
   }
