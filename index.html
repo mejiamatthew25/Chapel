@@ -420,7 +420,7 @@
     gap:8px;
     flex-wrap:wrap;
   }
-  input[type=text], input[type=number], input[type=time], input[type=password], input[type=email], select{
+  input[type=text], input[type=number], input[type=time], input[type=password], input[type=email], input[type=date], select, textarea{
     font-family:'Inter',sans-serif;
     font-size:14px;
     padding:8px 10px;
@@ -429,7 +429,8 @@
     background:var(--white);
     color:var(--ink);
   }
-  input[type=text]:focus, input[type=number]:focus, input[type=time]:focus, input[type=password]:focus, input[type=email]:focus, select:focus{
+  textarea{ width:100%; resize:vertical; }
+  input[type=text]:focus, input[type=number]:focus, input[type=time]:focus, input[type=password]:focus, input[type=email]:focus, input[type=date]:focus, select:focus, textarea:focus{
     outline:2px solid var(--slate);
     outline-offset:1px;
   }
@@ -590,6 +591,12 @@
   }
   .user-item .left{ flex-direction:column; align-items:flex-start; gap:1px; }
   .user-item .uname{ color:var(--ink-soft); font-size:12.5px; }
+  .slot-desc{
+    color:var(--ink-soft);
+    font-size:12.5px;
+    margin-top:3px;
+    line-height:1.4;
+  }
   .row-actions{ display:flex; gap:12px; align-items:center; }
   .swatch{
     width:14px;height:14px;border-radius:50%;flex:none;
@@ -695,8 +702,9 @@ let state = {
   cpNew:'', cpConfirm:'', cpError:'', cpSuccess:'',
 
   newRoleName:'', newRoleColor:PALETTE[0], roleFormError:'',
-  newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3}, slotFormError:'',
-  newOneOff:{roleId:'', date:'', start:'09:00', end:'10:00', capacity:3}, oneOffFormError:'',
+  newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3, description:''}, slotFormError:'',
+  newOneOff:{roleId:'', date:'', start:'09:00', end:'10:00', capacity:3, description:''}, oneOffFormError:'',
+  editingSlotId:null, editSlot:null, editSlotError:'',
   newChurchName:'', churchNameError:'',
   userFormError:'',
 
@@ -1242,6 +1250,7 @@ function renderDayPanel(){
             <div class="fill-status ${isFull?'full':''}">${isFull ? 'Filled' : `${filled.length} of ${cap} filled`}</div>
           </div>
           <div class="slot-time">${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}</div>
+          ${slot.description ? `<div class="slot-desc">${escapeHtml(slot.description)}</div>` : ''}
           <div class="capacity-dots">${capDots}</div>
           ${namesHtml}
           ${notesHtml}
@@ -1599,33 +1608,83 @@ async function deleteRole(id){
 
 async function addSlot(){
   state.slotFormError = '';
-  const { roleId, day, start, end, capacity } = state.newSlot;
+  const { roleId, day, start, end, capacity, description } = state.newSlot;
   if(!roleId){ state.slotFormError = 'Choose a role first.'; render(); return; }
   if(!start || !end){ state.slotFormError = 'Set a start and end time.'; render(); return; }
   if(start >= end){ state.slotFormError = 'End time must be after start time.'; render(); return; }
   if(!capacity || Number(capacity) < 1){ state.slotFormError = 'Volunteers needed must be at least 1.'; render(); return; }
   const { data, error } = await sb.from('slots').insert({
-    role_id: roleId, day:Number(day), specific_date:null, start_time:start, end_time:end, capacity:Number(capacity)
+    role_id: roleId, day:Number(day), specific_date:null, start_time:start, end_time:end,
+    capacity:Number(capacity), description:(description||'').trim() || null
   }).select().single();
   if(error){ state.slotFormError = error.message; render(); return; }
   state.slots.push(data);
+  state.newSlot = { roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3, description:'' };
   render();
 }
 
 async function addOneOffSlot(){
   state.oneOffFormError = '';
-  const { roleId, date, start, end, capacity } = state.newOneOff;
+  const { roleId, date, start, end, capacity, description } = state.newOneOff;
   if(!roleId){ state.oneOffFormError = 'Choose a role first.'; render(); return; }
   if(!date){ state.oneOffFormError = 'Choose a date.'; render(); return; }
   if(!start || !end){ state.oneOffFormError = 'Set a start and end time.'; render(); return; }
   if(start >= end){ state.oneOffFormError = 'End time must be after start time.'; render(); return; }
   if(!capacity || Number(capacity) < 1){ state.oneOffFormError = 'Volunteers needed must be at least 1.'; render(); return; }
   const { data, error } = await sb.from('slots').insert({
-    role_id: roleId, day:null, specific_date:date, start_time:start, end_time:end, capacity:Number(capacity)
+    role_id: roleId, day:null, specific_date:date, start_time:start, end_time:end,
+    capacity:Number(capacity), description:(description||'').trim() || null
   }).select().single();
   if(error){ state.oneOffFormError = error.message; render(); return; }
   state.slots.push(data);
-  state.newOneOff = { roleId:'', date:'', start:'09:00', end:'10:00', capacity:3 };
+  state.newOneOff = { roleId:'', date:'', start:'09:00', end:'10:00', capacity:3, description:'' };
+  render();
+}
+
+function startEditSlot(id){
+  const s = state.slots.find(x=>x.id===id);
+  if(!s) return;
+  state.editingSlotId = id;
+  state.editSlot = {
+    isOneOff: s.specific_date != null,
+    roleId: s.role_id,
+    day: s.day!=null ? String(s.day) : '0',
+    date: s.specific_date || '',
+    start: s.start_time,
+    end: s.end_time,
+    capacity: s.capacity,
+    description: s.description || ''
+  };
+  state.editSlotError = '';
+  render();
+}
+function cancelEditSlot(){
+  state.editingSlotId = null;
+  state.editSlotError = '';
+  render();
+}
+async function saveEditSlot(id){
+  const { isOneOff, roleId, day, date, start, end, capacity, description } = state.editSlot;
+  state.editSlotError = '';
+  if(!roleId){ state.editSlotError = 'Choose a role.'; render(); return; }
+  if(isOneOff && !date){ state.editSlotError = 'Choose a date.'; render(); return; }
+  if(!start || !end){ state.editSlotError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.editSlotError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.editSlotError = 'Volunteers needed must be at least 1.'; render(); return; }
+  const payload = {
+    role_id: roleId,
+    start_time: start,
+    end_time: end,
+    capacity: Number(capacity),
+    description: (description||'').trim() || null
+  };
+  if(isOneOff){ payload.day = null; payload.specific_date = date; }
+  else { payload.day = Number(day); payload.specific_date = null; }
+  const { data, error } = await sb.from('slots').update(payload).eq('id', id).select().single();
+  if(error){ state.editSlotError = error.message; render(); return; }
+  const idx = state.slots.findIndex(x=>x.id===id);
+  if(idx>-1) state.slots[idx] = data;
+  state.editingSlotId = null;
   render();
 }
 
@@ -1666,6 +1725,53 @@ function exportRosterCSV(){
   a.click();
   document.body.removeChild(a);
   setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function renderSlotEditRow(s){
+  const e = state.editSlot;
+  return `
+    <div class="slot-item" style="flex-direction:column; align-items:stretch;">
+      <div class="field-row" style="margin-top:0">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.editSlot.roleId=this.value">
+            ${state.roles.map(r=>`<option value="${r.id}" ${e.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        ${e.isOneOff ? `
+        <div class="field">
+          <label>Date</label>
+          <input type="date" value="${e.date}" oninput="state.editSlot.date=this.value">
+        </div>` : `
+        <div class="field">
+          <label>Day</label>
+          <select onchange="state.editSlot.day=this.value">
+            ${DAY_NAMES.map((d,i)=>`<option value="${i}" ${e.day==String(i)?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>`}
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${e.start}" oninput="state.editSlot.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${e.end}" oninput="state.editSlot.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${e.capacity}" style="width:80px" oninput="state.editSlot.capacity=this.value">
+        </div>
+      </div>
+      <div class="field" style="margin-top:2px">
+        <label>Description (optional)</label>
+        <textarea rows="2" oninput="state.editSlot.description=this.value">${escapeHtml(e.description)}</textarea>
+      </div>
+      <div class="field-row" style="margin-top:2px">
+        <button class="btn" onclick="saveEditSlot('${s.id}')">Save</button>
+        <button class="btn secondary" onclick="cancelEditSlot()">Cancel</button>
+      </div>
+      ${state.editSlotError ? `<div class="form-error" style="margin-top:0">${escapeHtml(state.editSlotError)}</div>` : ''}
+    </div>`;
 }
 
 function renderAdmin(){
@@ -1752,6 +1858,7 @@ function renderAdmin(){
       <p class="sub">These repeat every week. Set how many volunteers each one needs.</p>
       <div class="slot-list">
         ${sortedSlots.length ? sortedSlots.map(s=>{
+          if(state.editingSlotId === s.id) return renderSlotEditRow(s);
           const role = roleById(s.role_id);
           const target = `slot:${s.id}`;
           const right = state.confirmTarget===target
@@ -1759,12 +1866,18 @@ function renderAdmin(){
                  <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
                  <button class="no" onclick="state.confirmTarget=null; render()">No</button>
                </span>`
-            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+            : `<span class="row-actions">
+                 <button class="small-link" onclick="startEditSlot('${s.id}')">Edit</button>
+                 <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+               </span>`;
           return `
           <div class="slot-item">
             <div class="left">
               <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
-              ${role?escapeHtml(role.name):'(deleted role)'} — ${DAY_NAMES[Number(s.day)]}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+              <span>
+                ${role?escapeHtml(role.name):'(deleted role)'} — ${DAY_NAMES[Number(s.day)]}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+                ${s.description ? `<div class="slot-desc">${escapeHtml(s.description)}</div>` : ''}
+              </span>
             </div>
             ${right}
           </div>`;
@@ -1796,8 +1909,12 @@ function renderAdmin(){
           <label>Volunteers needed</label>
           <input type="number" min="1" value="${state.newSlot.capacity}" style="width:80px" oninput="state.newSlot.capacity=this.value">
         </div>
-        <button class="btn" onclick="addSlot()" style="align-self:flex-end">Add slot</button>
       </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Description (optional)</label>
+        <textarea rows="2" placeholder="e.g. Meet in the choir room 15 minutes early" oninput="state.newSlot.description=this.value">${escapeHtml(state.newSlot.description)}</textarea>
+      </div>
+      <button class="btn" onclick="addSlot()">Add slot</button>
       ${state.slotFormError ? `<div class="form-error">${escapeHtml(state.slotFormError)}</div>` : ''}
     </div>
 
@@ -1806,6 +1923,7 @@ function renderAdmin(){
       <p class="sub">Use this for a single event that doesn't repeat, like a special service or a parish event.</p>
       <div class="slot-list">
         ${sortedOneOffs.length ? sortedOneOffs.map(s=>{
+          if(state.editingSlotId === s.id) return renderSlotEditRow(s);
           const role = roleById(s.role_id);
           const target = `slot:${s.id}`;
           const right = state.confirmTarget===target
@@ -1813,12 +1931,18 @@ function renderAdmin(){
                  <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
                  <button class="no" onclick="state.confirmTarget=null; render()">No</button>
                </span>`
-            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+            : `<span class="row-actions">
+                 <button class="small-link" onclick="startEditSlot('${s.id}')">Edit</button>
+                 <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+               </span>`;
           return `
           <div class="slot-item">
             <div class="left">
               <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
-              ${role?escapeHtml(role.name):'(deleted role)'} — ${fmtDateWithYear(parseIsoLocal(s.specific_date))}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+              <span>
+                ${role?escapeHtml(role.name):'(deleted role)'} — ${fmtDateWithYear(parseIsoLocal(s.specific_date))}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+                ${s.description ? `<div class="slot-desc">${escapeHtml(s.description)}</div>` : ''}
+              </span>
             </div>
             ${right}
           </div>`;
@@ -1848,8 +1972,12 @@ function renderAdmin(){
           <label>Volunteers needed</label>
           <input type="number" min="1" value="${state.newOneOff.capacity}" style="width:80px" oninput="state.newOneOff.capacity=this.value">
         </div>
-        <button class="btn" onclick="addOneOffSlot()" style="align-self:flex-end">Add one-off date</button>
       </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Description (optional)</label>
+        <textarea rows="2" placeholder="e.g. Reception to follow in the parish hall" oninput="state.newOneOff.description=this.value">${escapeHtml(state.newOneOff.description)}</textarea>
+      </div>
+      <button class="btn" onclick="addOneOffSlot()">Add one-off date</button>
       ${state.oneOffFormError ? `<div class="form-error">${escapeHtml(state.oneOffFormError)}</div>` : ''}
     </div>
   `;
