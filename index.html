@@ -1013,6 +1013,30 @@ async function adminAssignSignup(slotId, iso, capacity, profileId){
   render();
 }
 
+// Admin-only: look up a volunteer's email via a security-definer RPC (the
+// profiles table itself never stores or exposes email addresses), then open
+// a pre-filled mailto: link with the date, time, and role of their assignment.
+async function emailVolunteer(userId, slotId, iso){
+  state.slotActionError = '';
+  const slot = state.slots.find(s=>s.id===slotId);
+  const role = slot ? roleById(slot.role_id) : null;
+  if(!slot || !role){ state.slotActionError = 'Could not find that slot.'; render(); return; }
+  try{
+    const { data, error } = await sb.rpc('admin_get_volunteer_email', { target_id: userId });
+    if(error) throw error;
+    if(!data){ state.slotActionError = "Couldn't find an email address for that volunteer."; render(); return; }
+    const d = parseIsoLocal(iso);
+    const dateStr = fmtDateWithYear(d);
+    const timeStr = `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`;
+    const subject = encodeURIComponent(`Your volunteer assignment: ${role.name} on ${dateStr}`);
+    const body = encodeURIComponent(`Hi,\n\nYou're scheduled to volunteer as ${role.name} on ${dateStr} from ${timeStr}.\n\nThanks for helping out!\n\n— ${state.churchName}`);
+    window.location.href = `mailto:${data}?subject=${subject}&body=${body}`;
+  }catch(e){
+    state.slotActionError = (e && e.message) || 'Could not look up that email address.';
+    render();
+  }
+}
+
 // ---------- CALENDAR EXPORT (Google Calendar / iCal) ----------
 
 function toggleCalendarMenu(key){
@@ -1173,6 +1197,7 @@ function renderDayPanel(){
       const namesHtml = filled.length ? `<div class="names">${filled.map(e=>{
         const isMine = e.user_id===myId;
         const canRemove = isMine || isAdminViewer;
+        const showMailBtn = isAdminViewer && !isMine;
         const name = profileName(e.user_id);
         const noteAttr = e.note ? ` title="${escapeAttr(e.note)}"` : '';
         const noteIcon = e.note ? ' <span aria-hidden="true">📝</span>' : '';
@@ -1187,7 +1212,8 @@ function renderDayPanel(){
           </span>`;
         }
         const chipClass = isMine ? 'chip mine' : 'chip admin-removable';
-        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+        const mailBtn = showMailBtn ? `<button title="Email about this assignment" onclick="emailVolunteer('${e.user_id}','${slot.id}','${iso}')">✉</button>` : '';
+        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}${mailBtn}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
       }).join('')}</div>` : '';
 
       const withNotes = filled.filter(e=>e.note);
