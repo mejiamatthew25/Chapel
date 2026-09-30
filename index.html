@@ -3355,6 +3355,2232 @@ function triggerICSDownload(slotId, iso){
 
 // ---------- MONTH EXPORT (Excel) ----------
 
+async function fetchEmailsForUsers(userIds){
+  const unique = [...new Set(userIds)];
+  const emailMap = {};
+  await Promise.all(unique.map(async (uid)=>{
+    try{
+      const { data, error } = await sb.rpc('admin_get_volunteer_email', { target_id: uid });
+      if(!error && data) emailMap[uid] = data;
+    }catch(e){ /* leave blank for this person if the lookup fails */ }
+  }));
+  return emailMap;
+}
+
+async function exportMonthExcel(){
+  state.exportError = '';
+  if(typeof ExcelJS === 'undefined'){
+    state.exportError = 'The spreadsheet library failed to load. Check your internet connection and try again.';
+    render();
+    return;
+  }
+  state.exportingMonth = true;
+  render();
+
+  try{
+    const cm = state.calendarMonth;
+    const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
+
+    const rows = [];
+    for(let day=1; day<=numDays; day++){
+      const d = new Date(cm.getFullYear(), cm.getMonth(), day);
+      const iso = isoDate(d);
+      const daySlots = slotsForDate(d);
+      for(const {slot, role} of daySlots){
+        const filled = signupsFor(slot.id, iso);
+        for(const e of filled){
+          rows.push({
+            userId: e.user_id,
+            name: profileName(e.user_id),
+            role: role.name,
+            description: slot.description || '',
+            date: d,
+            time: `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`
+          });
+        }
+      }
+    }
+
+    if(rows.length === 0){
+      state.exportError = `No one is signed up to volunteer in ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} yet.`;
+      state.exportingMonth = false;
+      render();
+      return;
+    }
+
+    rows.sort((a,b)=> a.date - b.date || a.time.localeCompare(b.time) || a.name.localeCompare(b.name));
+
+    const emailMap = await fetchEmailsForUsers(rows.map(r=>r.userId));
+    rows.forEach(r=>{ r.email = emailMap[r.userId] || ''; });
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = state.churchName;
+    workbook.created = new Date();
+    const sheetName = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}`.slice(0,31);
+    const sheet = workbook.addWorksheet(sheetName);
+
+    const columns = [
+      { header:'Name', key:'name', width:22 },
+      { header:'Email', key:'email', width:28 },
+      { header:'Role', key:'role', width:18 },
+      { header:'Description', key:'description', width:34 },
+      { header:'Date', key:'date', width:14 },
+      { header:'Time', key:'time', width:20 }
+    ];
+    // Set widths/keys only — headers are drawn manually in row 3 below,
+    // so ExcelJS shouldn't auto-reserve row 1 for its own header row.
+    sheet.columns = columns.map(c=>({ key:c.key, width:c.width }));
+
+    // Row 1: title banner
+    sheet.mergeCells(1,1,1,columns.length);
+    const titleCell = sheet.getCell('A1');
+    titleCell.value = `${state.churchName} — Volunteer Schedule`;
+    titleCell.font = { bold:true, size:16, color:{ argb:'FFFFFFFF' } };
+    titleCell.alignment = { vertical:'middle', horizontal:'left' };
+    sheet.getRow(1).height = 28;
+    sheet.getRow(1).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF16311F' } }; });
+
+    // Row 2: subtitle
+    sheet.mergeCells(2,1,2,columns.length);
+    const subtitleCell = sheet.getCell('A2');
+    subtitleCell.value = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}  ·  Exported ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
+    subtitleCell.font = { italic:true, size:11, color:{ argb:'FF16311F' } };
+    sheet.getRow(2).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFE1EBDE' } }; });
+
+    // Row 3: column headers
+    const headerRow = sheet.getRow(3);
+    columns.forEach((col,i)=>{ headerRow.getCell(i+1).value = col.header; });
+    headerRow.eachCell({ includeEmpty:true }, c=>{
+      c.font = { bold:true, color:{ argb:'FFFFFFFF' } };
+      c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1B4D2E' } };
+      c.alignment = { vertical:'middle', horizontal:'center' };
+    });
+    headerRow.height = 20;
+    sheet.autoFilter = { from:{ row:3, column:1 }, to:{ row:3, column:columns.length } };
+    sheet.views = [{ state:'frozen', ySplit:3 }];
+
+    // Data rows
+    rows.forEach((r, idx)=>{
+      const row = sheet.addRow({
+        name: r.name,
+        email: r.email,
+        role: r.role,
+        description: r.description,
+        date: r.date,
+        time: r.time
+      });
+      row.getCell(5).numFmt = 'mmm d, yyyy'; // Date is the 5th column
+      row.eachCell({ includeEmpty:true }, c=>{
+        c.alignment = { vertical:'top', wrapText:true };
+        c.border = { bottom:{ style:'hair', color:{ argb:'FFDCD5C0' } } };
+      });
+      if(idx % 2 === 1){
+        row.eachCell({ includeEmpty:true }, c=>{
+          c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFF6F9F5' } };
+        });
+      }
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeChurch = state.churchName.replace(/[^a-z0-9]+/gi,'-');
+    a.href = url;
+    a.download = `${safeChurch}-volunteers-${MONTH_NAMES[cm.getMonth()]}-${cm.getFullYear()}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 3000);
+  }catch(e){
+    state.exportError = (e && e.message) || 'Could not generate the spreadsheet.';
+  }finally{
+    state.exportingMonth = false;
+    render();
+  }
+}
+
+
+function renderCalendar(){
+  const cm = state.calendarMonth;
+  const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
+  const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
+
+  let cells = '';
+  for(let i=0;i<firstDow;i++) cells += `<div class="cal-cell empty"></div>`;
+
+  for(let day=1; day<=numDays; day++){
+    const d = new Date(cm.getFullYear(), cm.getMonth(), day);
+    const iso = isoDate(d);
+    const daySlots = slotsForDate(d);
+    const isToday = sameDate(d, today);
+    const isSelected = sameDate(d, state.selectedDate);
+    const isPast = d < today;
+    const uniqueRoles = [...new Map(daySlots.map(x=>[x.role.id,x.role])).values()];
+    const shown = uniqueRoles.slice(0,4);
+    const extra = uniqueRoles.length - shown.length;
+    const dots = shown.map(r=>{
+      // A role is "full" for the day once every one of its slot instances that day has hit capacity.
+      const roleSlots = daySlots.filter(x=>x.role.id===r.id);
+      const isFull = roleSlots.every(x=>signupsFor(x.slot.id, iso).length >= x.slot.capacity);
+      return `<span class="${isFull?'full':''}" style="background:${r.color}" title="${escapeAttr(r.name)}${isFull?' — full':''}"></span>`;
+    }).join('') + (extra>0?`<span class="more">+${extra}</span>`:'');
+
+    cells += `
+      <button type="button" class="cal-cell ${isToday?'today':''} ${isSelected?'selected':''} ${daySlots.length?'has-slots':''} ${isPast?'past':''}"
+        onclick="selectDate(${cm.getFullYear()},${cm.getMonth()},${day})" ${isPast?'disabled':''}>
+        <span class="num">${day}</span>
+        <span class="cal-dots">${dots}</span>
+      </button>`;
+  }
+
+  const dow = DOW_SHORT.map(s=>`<div class="cal-dow">${s}</div>`).join('');
+  const isAdminViewer = !!(state.profile && state.profile.is_admin);
+
+  return `
+    <div class="cal-nav">
+      <div class="month-label">${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}</div>
+      <div class="cal-nav-btns">
+        <button onclick="changeMonth(-1)" aria-label="Previous month">‹</button>
+        <button onclick="changeMonth(1)" aria-label="Next month">›</button>
+      </div>
+    </div>
+    <div class="cal-grid">${dow}${cells}</div>
+    ${isAdminViewer ? `
+      <div class="export-row">
+        <button class="btn secondary" ${state.exportingMonth?'disabled':''} onclick="exportMonthExcel()">
+          ${state.exportingMonth ? 'Preparing spreadsheet…' : `Export ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} (.xlsx)`}
+        </button>
+        ${state.exportError ? `<div class="form-error" style="margin-top:8px">${escapeHtml(state.exportError)}</div>` : ''}
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderDayPanel(){
+  const d = state.selectedDate;
+  const daySlots = slotsForDate(d);
+  const isPast = d < today;
+  const myId = state.session.user.id;
+  const isAdminViewer = !!(state.profile && state.profile.is_admin);
+
+  let inner = '';
+  if(state.slotActionError){
+    inner += `<div class="form-error">${escapeHtml(state.slotActionError)}</div>`;
+  }
+  if(daySlots.length === 0){
+    inner += `<p class="past-note">Nothing scheduled this day.</p>`;
+  } else {
+    if(isPast) inner += `<p class="past-note">This date has passed.</p>`;
+    inner += daySlots.map(({slot, role})=>{
+      const iso = isoDate(d);
+      const instKey = `${slot.id}__${iso}`;
+      const filled = signupsFor(slot.id, iso);
+      const cap = slot.capacity;
+      const isFull = filled.length >= cap;
+      const mine = filled.find(e=>e.user_id===myId);
+      const capDots = Array.from({length:cap}).map((_,i)=>`<span class="${i<filled.length?'on':''}"></span>`).join('');
+
+      const namesHtml = filled.length ? `<div class="names">${filled.map(e=>{
+        const isMine = e.user_id===myId;
+        const canRemove = isMine || isAdminViewer;
+        const showMailBtn = isAdminViewer && !isMine;
+        const name = profileName(e.user_id);
+        const noteAttr = e.note ? ` title="${escapeAttr(e.note)}"` : '';
+        const noteIcon = e.note ? ' <span aria-hidden="true">📝</span>' : '';
+        if(!canRemove) return `<span class="chip"${noteAttr}>${escapeHtml(name)}${noteIcon}</span>`;
+        const ctarget = `signup:${e.id}`;
+        if(state.confirmTarget===ctarget){
+          return `<span class="chip confirming">${escapeHtml(name)}
+            <span class="confirm-inline">${isMine?'Cancel?':'Remove?'}
+              <button class="yes" onclick="removeSignup('${e.id}')">Yes</button>
+              <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+            </span>
+          </span>`;
+        }
+        const chipClass = isMine ? 'chip mine' : 'chip admin-removable';
+        const mailBtn = showMailBtn ? `<button title="Email about this assignment" onclick="emailVolunteer('${e.user_id}','${slot.id}','${iso}')">✉</button>` : '';
+        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}${mailBtn}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+      }).join('')}</div>` : '';
+
+      const withNotes = filled.filter(e=>e.note);
+      const notesHtml = withNotes.length ? `<div class="note-list">${withNotes.map(e=>
+        `<div class="note-line"><strong>${escapeHtml(profileName(e.user_id))}:</strong> ${escapeHtml(e.note)}</div>`
+      ).join('')}</div>` : '';
+
+      let actionHtml = '';
+      if(!isPast){
+        if(mine){
+          const menuKey = `cal:${slot.id}__${iso}`;
+          const gcalUrl = buildGoogleCalendarUrl(role, slot, d, mine.note);
+          const menuOpen = state.calendarMenuFor === menuKey;
+          actionHtml = `
+            <div style="margin-top:8px" class="fill-status mine">You're signed up for this.</div>
+            <div class="cal-export">
+              <button class="small-link" onclick="toggleCalendarMenu('${menuKey}')">Add to calendar ${menuOpen ? '▴' : '▾'}</button>
+              ${menuOpen ? `
+                <div class="cal-export-menu">
+                  <a href="${gcalUrl}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+                  <button onclick="triggerICSDownload('${slot.id}','${iso}')">Download iCal (.ics)</button>
+                </div>
+              ` : ''}
+            </div>`;
+        } else if(state.openSignupFor === instKey){
+          actionHtml = `
+            <div class="inline-form" style="flex-direction:column; align-items:stretch;">
+              <input type="text" placeholder="Notes or special requests (optional)" value="${escapeAttr(state.noteDraft)}" oninput="state.noteDraft=this.value" onkeydown="if(event.key==='Enter'){submitSignup('${slot.id}','${iso}',${cap})}">
+              <div style="display:flex; gap:8px;">
+                <button class="btn" onclick="submitSignup('${slot.id}','${iso}',${cap})">Confirm sign-up</button>
+                <button class="btn secondary" onclick="closeSignupForm()">Cancel</button>
+              </div>
+            </div>`;
+        } else {
+          actionHtml = `<button class="signup-btn" ${isFull?'disabled':''} onclick="openSignupForm('${instKey}')">${isFull?'Full':'Sign up'}</button>`;
+        }
+      }
+
+      let adminAssignHtml = '';
+      if(isAdminViewer && !isPast && !isFull){
+        const assignId = `assign-${instKey}`;
+        const alreadyIds = new Set(filled.map(e=>e.user_id));
+        const options = state.profiles
+          .filter(p=>!alreadyIds.has(p.id))
+          .map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+        adminAssignHtml = `
+          <div class="admin-assign">
+            <select id="${assignId}">
+              <option value="">Assign a volunteer…</option>
+              ${options}
+            </select>
+            <button class="small-link" onclick="adminAssignSignup('${slot.id}','${iso}',${cap}, document.getElementById('${assignId}').value)">Add</button>
+          </div>`;
+      }
+
+      return `
+        <div class="slot-row">
+          <div class="slot-top">
+            <div class="role-tag"><span class="dot" style="background:${role.color}"></span>${escapeHtml(role.name)}</div>
+            <div class="fill-status ${isFull?'full':''}">${isFull ? 'Filled' : `${filled.length} of ${cap} filled`}</div>
+          </div>
+          <div class="slot-time">${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}</div>
+          ${slot.description ? `<div class="slot-desc">${escapeHtml(slot.description)}</div>` : ''}
+          <div class="capacity-dots">${capDots}</div>
+          ${namesHtml}
+          ${notesHtml}
+          ${actionHtml}
+          ${adminAssignHtml}
+        </div>`;
+    }).join('');
+  }
+
+  return `
+    <div class="day-panel">
+      <div class="day-panel-heading">${fmtDateLong(d)}</div>
+      ${inner}
+    </div>
+  `;
+}
+
+// ---------- ANNOUNCEMENTS ----------
+
+function fmtPostedAt(iso){
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', { month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+}
+
+function openAnnouncementForm(){
+  state.showAnnouncementForm = true;
+  state.newAnnouncementTitle = '';
+  state.newAnnouncementBody = '';
+  state.announcementFormError = '';
+  render();
+}
+function closeAnnouncementForm(){
+  state.showAnnouncementForm = false;
+  state.announcementFormError = '';
+  render();
+}
+async function addAnnouncement(){
+  const title = state.newAnnouncementTitle.trim();
+  const body = state.newAnnouncementBody.trim();
+  state.announcementFormError = '';
+  if(!title){ state.announcementFormError = 'Enter a title.'; render(); return; }
+  if(!body){ state.announcementFormError = 'Enter some body text.'; render(); return; }
+  const { data, error } = await sb.from('announcements')
+    .insert({ title, body, author_id: state.session.user.id })
+    .select('id, title, body, author_id, created_at')
+    .single();
+  if(error){ state.announcementFormError = error.message; render(); return; }
+  state.announcements.unshift(data);
+  state.showAnnouncementForm = false;
+  state.newAnnouncementTitle = '';
+  state.newAnnouncementBody = '';
+  render();
+}
+
+function startEditAnnouncement(id){
+  const a = state.announcements.find(x=>x.id===id);
+  if(!a) return;
+  state.editingAnnouncementId = id;
+  state.editAnnouncementTitle = a.title;
+  state.editAnnouncementBody = a.body;
+  state.editAnnouncementError = '';
+  render();
+}
+function cancelEditAnnouncement(){
+  state.editingAnnouncementId = null;
+  state.editAnnouncementError = '';
+  render();
+}
+async function saveEditAnnouncement(id){
+  const title = state.editAnnouncementTitle.trim();
+  const body = state.editAnnouncementBody.trim();
+  state.editAnnouncementError = '';
+  if(!title){ state.editAnnouncementError = 'Enter a title.'; render(); return; }
+  if(!body){ state.editAnnouncementError = 'Enter some body text.'; render(); return; }
+  const { data, error } = await sb.from('announcements')
+    .update({ title, body })
+    .eq('id', id)
+    .select('id, title, body, author_id, created_at')
+    .single();
+  if(error){ state.editAnnouncementError = error.message; render(); return; }
+  const idx = state.announcements.findIndex(x=>x.id===id);
+  if(idx>-1) state.announcements[idx] = data;
+  state.editingAnnouncementId = null;
+  render();
+}
+async function deleteAnnouncement(id){
+  const { error } = await sb.from('announcements').delete().eq('id', id);
+  if(error){ showError(error, 'Could not delete that announcement.'); state.confirmTarget=null; render(); return; }
+  state.announcements = state.announcements.filter(a=>a.id!==id);
+  state.confirmTarget = null;
+  render();
+}
+
+function renderAnnouncementsWidget(){
+  const isAdmin = state.profile && state.profile.is_admin;
+
+  let addSection = '';
+  if(isAdmin){
+    if(state.showAnnouncementForm){
+      addSection = `
+        <div class="announcement-form">
+          <input type="text" placeholder="Title" value="${escapeAttr(state.newAnnouncementTitle)}" oninput="state.newAnnouncementTitle=this.value">
+          <textarea placeholder="Body text" rows="3" oninput="state.newAnnouncementBody=this.value">${escapeHtml(state.newAnnouncementBody)}</textarea>
+          <div class="field-row" style="margin:0">
+            <button class="btn" onclick="addAnnouncement()">Post</button>
+            <button class="btn secondary" onclick="closeAnnouncementForm()">Cancel</button>
+          </div>
+          ${state.announcementFormError ? `<div class="form-error">${escapeHtml(state.announcementFormError)}</div>` : ''}
+        </div>`;
+    } else {
+      addSection = `<button class="btn secondary" style="width:100%; margin-bottom:14px;" onclick="openAnnouncementForm()">+ Add Announcement</button>`;
+    }
+  }
+
+  let listHtml;
+  if(state.announcements.length === 0){
+    listHtml = `<p class="past-note">No current announcements.</p>`;
+  } else {
+    listHtml = state.announcements.map(a=>{
+      if(state.editingAnnouncementId === a.id){
+        return `
+          <div class="announcement-card">
+            <div class="announcement-form">
+              <input type="text" placeholder="Title" value="${escapeAttr(state.editAnnouncementTitle)}" oninput="state.editAnnouncementTitle=this.value">
+              <textarea placeholder="Body text" rows="3" oninput="state.editAnnouncementBody=this.value">${escapeHtml(state.editAnnouncementBody)}</textarea>
+              <div class="field-row" style="margin:0">
+                <button class="btn" onclick="saveEditAnnouncement('${a.id}')">Save</button>
+                <button class="btn secondary" onclick="cancelEditAnnouncement()">Cancel</button>
+              </div>
+              ${state.editAnnouncementError ? `<div class="form-error">${escapeHtml(state.editAnnouncementError)}</div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      const target = `announcement:${a.id}`;
+      const adminControls = isAdmin ? (
+        state.confirmTarget===target
+          ? `<span class="confirm-inline">Delete?
+               <button class="yes" onclick="deleteAnnouncement('${a.id}')">Yes</button>
+               <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+             </span>`
+          : `<div class="announcement-actions">
+               <button class="small-link" onclick="startEditAnnouncement('${a.id}')">Edit</button>
+               <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+             </div>`
+      ) : '';
+
+      return `
+        <div class="announcement-card">
+          <div class="announcement-title">${escapeHtml(a.title)}</div>
+          <div class="announcement-body">${escapeHtml(a.body)}</div>
+          <div class="announcement-meta">${escapeHtml(profileName(a.author_id))} · ${fmtPostedAt(a.created_at)}</div>
+          ${adminControls}
+        </div>`;
+    }).join('');
+  }
+
+  return `
+    <div class="sidebar-card">
+      <h2 class="sidebar-title">Announcements</h2>
+      ${addSection}
+      ${listHtml}
+    </div>`;
+}
+
+function renderSignupView(){
+  let mainCol;
+  if(state.roles.length===0 || state.slots.length===0){
+    mainCol = `
+      <div class="empty">
+        No volunteer slots have been set up yet.${state.profile && state.profile.is_admin ? ' Head to Admin to add roles and time slots.' : ' Ask your administrator to add roles and time slots.'}
+      </div>`;
+  } else {
+    mainCol = renderCalendar() + renderDayPanel();
+  }
+  return `
+    <div class="page-grid">
+      <div class="main-col">${mainCol}</div>
+      <div class="side-col">${renderAnnouncementsWidget()}</div>
+    </div>`;
+}
+
+// ---------- MY SIGN-UPS ----------
+
+function renderMySignups(){
+  const myId = state.session.user.id;
+  const todayIso = isoDate(today);
+
+  const mine = state.signups
+    .filter(s=>s.user_id===myId && s.signup_date >= todayIso)
+    .map(s=>{
+      const slot = state.slots.find(x=>x.id===s.slot_id);
+      const role = slot ? roleById(slot.role_id) : null;
+      return { signup:s, slot, role };
+    })
+    .filter(x=>x.slot && x.role)
+    .sort((a,b)=> a.signup.signup_date.localeCompare(b.signup.signup_date) || a.slot.start_time.localeCompare(b.slot.start_time));
+
+  if(mine.length === 0){
+    return `
+      <div class="empty">
+        You have no upcoming volunteer commitments.
+        <div style="margin-top:14px"><button class="btn secondary" onclick="goSignup()">Go to the schedule</button></div>
+      </div>`;
+  }
+
+  return mine.map(({signup, slot, role})=>{
+    const d = parseIsoLocal(signup.signup_date);
+    const menuKey = `cal:${slot.id}__${signup.signup_date}`;
+    const menuOpen = state.calendarMenuFor === menuKey;
+    const gcalUrl = buildGoogleCalendarUrl(role, slot, d, signup.note);
+    const ctarget = `signup:${signup.id}`;
+
+    const cancelHtml = state.confirmTarget===ctarget
+      ? `<span class="confirm-inline">Cancel this sign-up?
+           <button class="yes" onclick="removeSignup('${signup.id}')">Yes</button>
+           <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+         </span>`
+      : `<button class="small-link" onclick="askRemoveSignup('${ctarget}')">Cancel sign-up</button>`;
+
+    return `
+      <div class="slot-row">
+        <div class="day-panel-heading" style="font-size:15px; border:none; padding-bottom:2px; margin-bottom:6px;">${fmtDateWithYear(d)}</div>
+        <div class="slot-top">
+          <div class="role-tag"><span class="dot" style="background:${role.color}"></span>${escapeHtml(role.name)}</div>
+        </div>
+        <div class="slot-time">${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}</div>
+        ${signup.note ? `<div class="past-note" style="padding:4px 0 0">Note: ${escapeHtml(signup.note)}</div>` : ''}
+        <div class="cal-export">
+          <button class="small-link" onclick="toggleCalendarMenu('${menuKey}')">Add to calendar ${menuOpen ? '▴' : '▾'}</button>
+          ${menuOpen ? `
+            <div class="cal-export-menu">
+              <a href="${gcalUrl}" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>
+              <button onclick="triggerICSDownload('${slot.id}','${signup.signup_date}')">Download iCal (.ics)</button>
+            </div>
+          ` : ''}
+        </div>
+        <div style="margin-top:8px">${cancelHtml}</div>
+      </div>`;
+  }).join('');
+}
+
+// ---------- AUTH VIEWS ----------
+
+function renderLogin(){
+  return `
+    <div class="auth-box">
+      <h2>${escapeHtml(state.churchName)} Volunteer Sign-Up</h2>
+      <p>Sign in with your email and password.</p>
+      ${state.regNotice ? `<p class="auth-success">${escapeHtml(state.regNotice)}</p>` : ''}
+      <div class="field" style="margin-bottom:10px">
+        <input class="wide" type="email" placeholder="Email" value="${escapeAttr(state.loginEmail)}" oninput="state.loginEmail=this.value" onkeydown="if(event.key==='Enter'){login()}">
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <input class="wide" type="password" placeholder="Password" value="${escapeAttr(state.loginPassword)}" oninput="state.loginPassword=this.value" onkeydown="if(event.key==='Enter'){login()}">
+      </div>
+      <button class="btn" onclick="login()">Sign in</button>
+      <div class="auth-error">${state.loginError}</div>
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='forgot'; state.forgotError=''; state.forgotSuccess=''; render()">Forgot your password?</button></div>
+      <div style="margin-top:10px"><button class="small-link" onclick="state.view='register'; state.regError=''; render()">New here? Create an account</button></div>
+    </div>
+  `;
+}
+
+function renderRegister(){
+  return `
+    <div class="auth-box">
+      <h2>Join ${escapeHtml(state.churchName)}</h2>
+      <p>The very first person to sign up becomes the administrator automatically.</p>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="text" placeholder="Your name" value="${escapeAttr(state.regName)}" oninput="state.regName=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="email" placeholder="Email" value="${escapeAttr(state.regEmail)}" oninput="state.regEmail=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="Password (6+ characters)" value="${escapeAttr(state.regPassword)}" oninput="state.regPassword=this.value" onkeydown="if(event.key==='Enter'){registerAccount()}"></div>
+      <button class="btn" onclick="registerAccount()">Create account</button>
+      <div class="auth-error">${state.regError}</div>
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='login'; state.loginError=''; render()">Already have an account? Sign in</button></div>
+    </div>
+  `;
+}
+
+function renderForgot(){
+  return `
+    <div class="auth-box">
+      <h2>Reset your password</h2>
+      <p>Enter your email and we'll send you a reset link.</p>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="email" placeholder="Email" value="${escapeAttr(state.forgotEmail)}" oninput="state.forgotEmail=this.value" onkeydown="if(event.key==='Enter'){sendResetEmail()}"></div>
+      <button class="btn" onclick="sendResetEmail()">Send reset link</button>
+      <div class="auth-error">${state.forgotError}</div>
+      ${state.forgotSuccess ? `<div class="auth-success">${escapeHtml(state.forgotSuccess)}</div>` : ''}
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='login'; render()">Back to sign in</button></div>
+    </div>
+  `;
+}
+
+function renderReset(){
+  return `
+    <div class="auth-box">
+      <h2>Set a new password</h2>
+      <p>You followed a password reset link — choose a new password below.</p>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="New password (6+ characters)" value="${escapeAttr(state.resetPassword)}" oninput="state.resetPassword=this.value" onkeydown="if(event.key==='Enter'){submitNewPassword()}"></div>
+      <button class="btn" onclick="submitNewPassword()">Set new password</button>
+      <div class="auth-error">${state.resetError}</div>
+      ${state.resetSuccess ? `<div class="auth-success">${escapeHtml(state.resetSuccess)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderChangePass(){
+  return `
+    <div class="auth-box">
+      <h2>Change password</h2>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="New password" value="${escapeAttr(state.cpNew)}" oninput="state.cpNew=this.value"></div>
+      <div class="field" style="margin-bottom:10px"><input class="wide" type="password" placeholder="Confirm new password" value="${escapeAttr(state.cpConfirm)}" oninput="state.cpConfirm=this.value" onkeydown="if(event.key==='Enter'){changePassword()}"></div>
+      <button class="btn" onclick="changePassword()">Update password</button>
+      <div class="auth-error">${state.cpError}</div>
+      ${state.cpSuccess ? `<div class="auth-success">${state.cpSuccess}</div>` : ''}
+      <div style="margin-top:14px"><button class="small-link" onclick="state.view='signup'; render()">Back</button></div>
+    </div>
+  `;
+}
+
+// ---------- ADMIN ----------
+
+async function saveChurchName(){
+  state.churchNameError = '';
+  const val = state.newChurchName.trim();
+  if(!val) return;
+  const { error } = await sb.from('church_settings').update({ church_name: val }).eq('id', true);
+  if(error){ state.churchNameError = error.message; render(); return; }
+  state.churchName = val;
+  state.newChurchName = '';
+  render();
+}
+
+async function addRole(){
+  state.roleFormError = '';
+  const name = state.newRoleName.trim();
+  if(!name){ state.roleFormError = 'Enter a role name.'; render(); return; }
+  const { data, error } = await sb.from('roles').insert({ name, color: state.newRoleColor }).select().single();
+  if(error){ state.roleFormError = error.message; render(); return; }
+  state.roles.push(data);
+  state.roles.sort((a,b)=>a.name.localeCompare(b.name));
+  state.newRoleName = '';
+  render();
+}
+async function deleteRole(id){
+  const { error } = await sb.from('roles').delete().eq('id', id);
+  if(error){ showError(error, 'Could not delete that role.'); state.confirmTarget=null; render(); return; }
+  state.roles = state.roles.filter(r=>r.id!==id);
+  const removedSlotIds = state.slots.filter(s=>s.role_id===id).map(s=>s.id);
+  state.slots = state.slots.filter(s=>s.role_id!==id);
+  state.signups = state.signups.filter(s=>!removedSlotIds.includes(s.slot_id));
+  state.confirmTarget = null;
+  render();
+}
+
+async function addSlot(){
+  state.slotFormError = '';
+  const { roleId, day, start, end, capacity, description } = state.newSlot;
+  if(!roleId){ state.slotFormError = 'Choose a role first.'; render(); return; }
+  if(!start || !end){ state.slotFormError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.slotFormError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.slotFormError = 'Volunteers needed must be at least 1.'; render(); return; }
+  const { data, error } = await sb.from('slots').insert({
+    role_id: roleId, day:Number(day), specific_date:null, start_time:start, end_time:end,
+    capacity:Number(capacity), description:(description||'').trim() || null
+  }).select().single();
+  if(error){ state.slotFormError = error.message; render(); return; }
+  state.slots.push(data);
+  state.newSlot = { roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3, description:'' };
+  render();
+}
+
+async function addOneOffSlot(){
+  state.oneOffFormError = '';
+  const { roleId, date, start, end, capacity, description } = state.newOneOff;
+  if(!roleId){ state.oneOffFormError = 'Choose a role first.'; render(); return; }
+  if(!date){ state.oneOffFormError = 'Choose a date.'; render(); return; }
+  if(!start || !end){ state.oneOffFormError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.oneOffFormError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.oneOffFormError = 'Volunteers needed must be at least 1.'; render(); return; }
+  const { data, error } = await sb.from('slots').insert({
+    role_id: roleId, day:null, specific_date:date, start_time:start, end_time:end,
+    capacity:Number(capacity), description:(description||'').trim() || null
+  }).select().single();
+  if(error){ state.oneOffFormError = error.message; render(); return; }
+  state.slots.push(data);
+  state.newOneOff = { roleId:'', date:'', start:'09:00', end:'10:00', capacity:3, description:'' };
+  render();
+}
+
+function startEditSlot(id){
+  const s = state.slots.find(x=>x.id===id);
+  if(!s) return;
+  state.editingSlotId = id;
+  state.editSlot = {
+    isOneOff: s.specific_date != null,
+    roleId: s.role_id,
+    day: s.day!=null ? String(s.day) : '0',
+    date: s.specific_date || '',
+    start: s.start_time,
+    end: s.end_time,
+    capacity: s.capacity,
+    description: s.description || ''
+  };
+  state.editSlotError = '';
+  render();
+}
+function cancelEditSlot(){
+  state.editingSlotId = null;
+  state.editSlotError = '';
+  render();
+}
+async function saveEditSlot(id){
+  const { isOneOff, roleId, day, date, start, end, capacity, description } = state.editSlot;
+  state.editSlotError = '';
+  if(!roleId){ state.editSlotError = 'Choose a role.'; render(); return; }
+  if(isOneOff && !date){ state.editSlotError = 'Choose a date.'; render(); return; }
+  if(!start || !end){ state.editSlotError = 'Set a start and end time.'; render(); return; }
+  if(start >= end){ state.editSlotError = 'End time must be after start time.'; render(); return; }
+  if(!capacity || Number(capacity) < 1){ state.editSlotError = 'Volunteers needed must be at least 1.'; render(); return; }
+  const payload = {
+    role_id: roleId,
+    start_time: start,
+    end_time: end,
+    capacity: Number(capacity),
+    description: (description||'').trim() || null
+  };
+  if(isOneOff){ payload.day = null; payload.specific_date = date; }
+  else { payload.day = Number(day); payload.specific_date = null; }
+  const { data, error } = await sb.from('slots').update(payload).eq('id', id).select().single();
+  if(error){ state.editSlotError = error.message; render(); return; }
+  const idx = state.slots.findIndex(x=>x.id===id);
+  if(idx>-1) state.slots[idx] = data;
+  state.editingSlotId = null;
+  render();
+}
+
+async function deleteSlot(id){
+  const { error } = await sb.from('slots').delete().eq('id', id);
+  if(error){ showError(error, 'Could not delete that slot.'); state.confirmTarget=null; render(); return; }
+  state.slots = state.slots.filter(s=>s.id!==id);
+  state.signups = state.signups.filter(s=>s.slot_id!==id);
+  state.confirmTarget = null;
+  render();
+}
+
+async function toggleAdmin(id, current){
+  state.userFormError = '';
+  const { error } = await sb.from('profiles').update({ is_admin: !current }).eq('id', id);
+  if(error){ state.userFormError = error.message; render(); return; }
+  const p = profileById(id);
+  if(p) p.is_admin = !current;
+  if(state.profile && state.profile.id===id) state.profile.is_admin = !current;
+  render();
+}
+
+function exportRosterCSV(){
+  function csvField(s){
+    s = String(s === undefined || s === null ? '' : s);
+    if(/[",\r\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+    return s;
+  }
+  const rows = [['Name','Admin']];
+  for(const p of state.profiles) rows.push([p.name, p.is_admin ? 'Yes' : '']);
+  const csv = rows.map(r=>r.map(csvField).join(',')).join('\r\n');
+  const blob = new Blob(['\uFEFF' + csv], { type:'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `volunteer-roster-${isoDate(new Date())}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function renderSlotEditRow(s){
+  const e = state.editSlot;
+  return `
+    <div class="slot-item" style="flex-direction:column; align-items:stretch;">
+      <div class="field-row" style="margin-top:0">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.editSlot.roleId=this.value">
+            ${state.roles.map(r=>`<option value="${r.id}" ${e.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        ${e.isOneOff ? `
+        <div class="field">
+          <label>Date</label>
+          <input type="date" value="${e.date}" oninput="state.editSlot.date=this.value">
+        </div>` : `
+        <div class="field">
+          <label>Day</label>
+          <select onchange="state.editSlot.day=this.value">
+            ${DAY_NAMES.map((d,i)=>`<option value="${i}" ${e.day==String(i)?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>`}
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${e.start}" oninput="state.editSlot.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${e.end}" oninput="state.editSlot.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${e.capacity}" style="width:80px" oninput="state.editSlot.capacity=this.value">
+        </div>
+      </div>
+      <div class="field" style="margin-top:2px">
+        <label>Description (optional)</label>
+        <textarea rows="2" oninput="state.editSlot.description=this.value">${escapeHtml(e.description)}</textarea>
+      </div>
+      <div class="field-row" style="margin-top:2px">
+        <button class="btn" onclick="saveEditSlot('${s.id}')">Save</button>
+        <button class="btn secondary" onclick="cancelEditSlot()">Cancel</button>
+      </div>
+      ${state.editSlotError ? `<div class="form-error" style="margin-top:0">${escapeHtml(state.editSlotError)}</div>` : ''}
+    </div>`;
+}
+
+function renderAdmin(){
+  const sortedSlots = [...state.slots]
+    .filter(s => s.specific_date == null)
+    .sort((a,b)=> Number(a.day)-Number(b.day) || a.start_time.localeCompare(b.start_time));
+  const sortedOneOffs = [...state.slots]
+    .filter(s => s.specific_date != null)
+    .sort((a,b)=> a.specific_date.localeCompare(b.specific_date) || a.start_time.localeCompare(b.start_time));
+
+  return `
+    <div class="admin-section">
+      <h2>Church name</h2>
+      <div class="field-row">
+        <input type="text" placeholder="${escapeAttr(state.churchName)}" value="${escapeAttr(state.newChurchName)}" oninput="state.newChurchName=this.value">
+        <button class="btn secondary" onclick="saveChurchName()">Save</button>
+      </div>
+      ${state.churchNameError ? `<div class="form-error">${escapeHtml(state.churchNameError)}</div>` : ''}
+    </div>
+
+    <div class="admin-section">
+      <h2>Volunteers</h2>
+      <p class="sub">Everyone here created their own account. You can grant or remove admin access, but full account deletion has to be done from the Supabase dashboard (Authentication → Users) — a static site like this one can't safely do that itself.</p>
+      <div class="field-row" style="margin-bottom:4px">
+        <button class="btn secondary" onclick="exportRosterCSV()" ${state.profiles.length?'':'disabled'}>Export roster (.csv)</button>
+      </div>
+      ${state.userFormError ? `<div class="form-error">${escapeHtml(state.userFormError)}</div>` : ''}
+      <div class="user-list">
+        ${state.profiles.length ? state.profiles.map(p=>{
+          const target = `user:${p.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">${p.is_admin ? 'Remove admin access?' : 'Make admin?'}
+                 <button class="yes" onclick="toggleAdmin('${p.id}', ${p.is_admin}); state.confirmTarget=null;">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">${p.is_admin ? 'Remove admin' : 'Make admin'}</button>`;
+          return `
+          <div class="user-item">
+            <div class="left">${escapeHtml(p.name)}${p.is_admin ? `<span class="uname">admin</span>` : ''}</div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No one has signed up yet.</p>`}
+      </div>
+    </div>
+
+    <div class="admin-section">
+      <h2>Roles</h2>
+      <p class="sub">Roles are the kinds of volunteers needed, like Greeter or Nursery.</p>
+      <div class="role-list">
+        ${state.roles.length ? state.roles.map(r=>{
+          const slotsUsing = state.slots.filter(s=>s.role_id===r.id).length;
+          const target = `role:${r.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">${slotsUsing? `Also deletes ${slotsUsing} slot(s) —` : ''} delete?
+                 <button class="yes" onclick="deleteRole('${r.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>`;
+          return `
+          <div class="role-item">
+            <div class="left"><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No roles yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role name</label>
+          <input type="text" placeholder="e.g. Greeter" value="${escapeAttr(state.newRoleName)}" oninput="state.newRoleName=this.value">
+        </div>
+        <div class="field">
+          <label>Color</label>
+          <div class="color-picker">
+            ${PALETTE.map(c=>`<button type="button" style="background:${c}" class="${state.newRoleColor===c?'selected':''}" onclick="state.newRoleColor='${c}'; render()"></button>`).join('')}
+          </div>
+        </div>
+        <button class="btn" onclick="addRole()" style="align-self:flex-end">Add role</button>
+      </div>
+      ${state.roleFormError ? `<div class="form-error">${escapeHtml(state.roleFormError)}</div>` : ''}
+    </div>
+
+    <div class="admin-section">
+      <h2>Weekly time slots</h2>
+      <p class="sub">These repeat every week. Set how many volunteers each one needs.</p>
+      <div class="slot-list">
+        ${sortedSlots.length ? sortedSlots.map(s=>{
+          if(state.editingSlotId === s.id) return renderSlotEditRow(s);
+          const role = roleById(s.role_id);
+          const target = `slot:${s.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">Delete?
+                 <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<span class="row-actions">
+                 <button class="small-link" onclick="startEditSlot('${s.id}')">Edit</button>
+                 <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+               </span>`;
+          return `
+          <div class="slot-item">
+            <div class="left">
+              <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
+              <span>
+                ${role?escapeHtml(role.name):'(deleted role)'} — ${DAY_NAMES[Number(s.day)]}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+                ${s.description ? `<div class="slot-desc">${escapeHtml(s.description)}</div>` : ''}
+              </span>
+            </div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No time slots yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.newSlot.roleId=this.value">
+            <option value="" ${!state.newSlot.roleId?'selected':''}>Select role</option>
+            ${state.roles.map(r=>`<option value="${r.id}" ${state.newSlot.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Day</label>
+          <select onchange="state.newSlot.day=this.value">
+            ${DAY_NAMES.map((d,i)=>`<option value="${i}" ${state.newSlot.day==String(i)?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${state.newSlot.start}" oninput="state.newSlot.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${state.newSlot.end}" oninput="state.newSlot.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${state.newSlot.capacity}" style="width:80px" oninput="state.newSlot.capacity=this.value">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Description (optional)</label>
+        <textarea rows="2" placeholder="e.g. Meet in the choir room 15 minutes early" oninput="state.newSlot.description=this.value">${escapeHtml(state.newSlot.description)}</textarea>
+      </div>
+      <button class="btn" onclick="addSlot()">Add slot</button>
+      ${state.slotFormError ? `<div class="form-error">${escapeHtml(state.slotFormError)}</div>` : ''}
+    </div>
+
+    <div class="admin-section">
+      <h2>One-off dates</h2>
+      <p class="sub">Use this for a single event that doesn't repeat, like a special service or a parish event.</p>
+      <div class="slot-list">
+        ${sortedOneOffs.length ? sortedOneOffs.map(s=>{
+          if(state.editingSlotId === s.id) return renderSlotEditRow(s);
+          const role = roleById(s.role_id);
+          const target = `slot:${s.id}`;
+          const right = state.confirmTarget===target
+            ? `<span class="confirm-inline">Delete?
+                 <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
+                 <button class="no" onclick="state.confirmTarget=null; render()">No</button>
+               </span>`
+            : `<span class="row-actions">
+                 <button class="small-link" onclick="startEditSlot('${s.id}')">Edit</button>
+                 <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
+               </span>`;
+          return `
+          <div class="slot-item">
+            <div class="left">
+              <span class="swatch" style="background:${role?role.color:'#ccc'}"></span>
+              <span>
+                ${role?escapeHtml(role.name):'(deleted role)'} — ${fmtDateWithYear(parseIsoLocal(s.specific_date))}, ${fmtTime(s.start_time)}–${fmtTime(s.end_time)}, needs ${s.capacity}
+                ${s.description ? `<div class="slot-desc">${escapeHtml(s.description)}</div>` : ''}
+              </span>
+            </div>
+            ${right}
+          </div>`;
+        }).join('') : `<p class="sub">No one-off dates yet — add one below.</p>`}
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label>Role</label>
+          <select onchange="state.newOneOff.roleId=this.value">
+            <option value="" ${!state.newOneOff.roleId?'selected':''}>Select role</option>
+            ${state.roles.map(r=>`<option value="${r.id}" ${state.newOneOff.roleId===r.id?'selected':''}>${escapeHtml(r.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Date</label>
+          <input type="date" value="${state.newOneOff.date}" oninput="state.newOneOff.date=this.value">
+        </div>
+        <div class="field">
+          <label>Start</label>
+          <input type="time" value="${state.newOneOff.start}" oninput="state.newOneOff.start=this.value">
+        </div>
+        <div class="field">
+          <label>End</label>
+          <input type="time" value="${state.newOneOff.end}" oninput="state.newOneOff.end=this.value">
+        </div>
+        <div class="field">
+          <label>Volunteers needed</label>
+          <input type="number" min="1" value="${state.newOneOff.capacity}" style="width:80px" oninput="state.newOneOff.capacity=this.value">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label>Description (optional)</label>
+        <textarea rows="2" placeholder="e.g. Reception to follow in the parish hall" oninput="state.newOneOff.description=this.value">${escapeHtml(state.newOneOff.description)}</textarea>
+      </div>
+      <button class="btn" onclick="addOneOffSlot()">Add one-off date</button>
+      ${state.oneOffFormError ? `<div class="form-error">${escapeHtml(state.oneOffFormError)}</div>` : ''}
+    </div>
+  `;
+}
+
+// ---------- SHELL / ROUTING ----------
+
+function goAdmin(){
+  if(!state.profile || !state.profile.is_admin) return;
+  state.view = 'admin';
+  state.confirmTarget = null;
+  render();
+}
+function goSignup(){
+  state.view = state.session ? 'signup' : 'login';
+  state.confirmTarget = null;
+  render();
+}
+function goMySignups(){
+  if(!state.session) return;
+  state.view = 'my-signups';
+  state.confirmTarget = null;
+  render();
+}
+
+function render(){
+  const app = document.getElementById('app');
+  document.title = `${state.churchName} — Volunteer Sign-Up`;
+  if(!state.loaded){
+    app.innerHTML = `<div class="loading">Loading…</div>`;
+    return;
+  }
+
+  if((state.view==='signup' || state.view==='changepass' || state.view==='my-signups') && !state.session){
+    state.view = 'login';
+  }
+  if(state.view==='admin' && (!state.profile || !state.profile.is_admin)){
+    state.view = state.session ? 'signup' : 'login';
+  }
+
+  const bareViews = ['login','register','forgot','reset','changepass'];
+  const isBare = bareViews.includes(state.view);
+
+  let navHtml = '';
+  if(!isBare && state.session && state.profile){
+    const tabs = [
+      { key:'signup', label:'Schedule', onclick:'goSignup()' },
+      { key:'my-signups', label:'My Sign-Ups', onclick:'goMySignups()' }
+    ];
+    if(state.profile.is_admin) tabs.push({ key:'admin', label:'Admin', onclick:'goAdmin()' });
+    tabs.push({ key:'changepass', label:'Change password', onclick:"state.view='changepass'; state.cpError=''; state.cpSuccess=''; render()" });
+
+    const tabsHtml = tabs.map(t=>`<button class="tab ${state.view===t.key?'active':''}" onclick="${t.onclick}">${t.label}</button>`).join('')
+      + `<button class="tab signout" onclick="logout()">Sign out</button>`;
+
+    navHtml = `
+      <div class="tabbar">
+        <span class="whoami">Signed in as ${escapeHtml(state.profile.name)}</span>
+        <div class="tabs">${tabsHtml}</div>
+      </div>`;
+  }
+
+  const headingText = state.view==='admin' ? ['Admin','Manage roles, slots, and volunteers']
+    : state.view==='my-signups' ? ['My Sign-Ups','Your upcoming volunteer commitments']
+    : [state.churchName, 'Volunteer sign-up'];
+  const heading = `<div class="brand-row"><img class="brand-logo" src="${LOGO_DATA_URI}" alt="${escapeAttr(state.churchName)} logo"><div class="titleblock"><h1>${escapeHtml(headingText[0])}</h1><p>${escapeHtml(headingText[1])}</p></div></div>`;
+
+  const errorHtml = state.errorBanner
+    ? `<div class="error-banner"><span>${escapeHtml(state.errorBanner)}</span><button onclick="state.errorBanner=null; render()">Dismiss</button></div>`
+    : '';
+
+  let body = '';
+  if(state.view==='admin') body = renderAdmin();
+  else if(state.view==='login') body = renderLogin();
+  else if(state.view==='register') body = renderRegister();
+  else if(state.view==='forgot') body = renderForgot();
+  else if(state.view==='reset') body = renderReset();
+  else if(state.view==='changepass') body = renderChangePass();
+  else if(state.view==='my-signups' && state.session && state.profile) body = renderMySignups();
+  else if(state.session && state.profile) body = renderSignupView();
+  else body = state.errorBanner ? '' : `<div class="loading">Loading your profile…</div>`;
+
+  app.innerHTML = `
+    <header class="top">
+      ${heading}
+    </header>
+    ${navHtml}
+    ${errorHtml}
+    ${body}
+  `;
+}
+
+init();
+</script>
+</body>
+</html>    justify-content:space-between;
+    align-items:flex-start;
+    gap:16px;
+    margin-bottom:24px;
+  }
+  .titleblock h1{
+    font-family:'Source Serif 4', serif;
+    font-weight:700;
+    font-size:30px;
+    line-height:1.15;
+    margin:0 0 4px;
+    letter-spacing:-0.01em;
+  }
+  .titleblock p{
+    margin:0;
+    color:var(--ink-soft);
+    font-size:14.5px;
+  }
+  .brand-row{
+    display:flex;
+    align-items:center;
+    gap:14px;
+  }
+  .brand-logo{
+    width:52px;
+    height:52px;
+    object-fit:contain;
+    flex:none;
+  }
+  .nav-side{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-end;
+    gap:4px;
+  }
+  .nav-side .whoami{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .tabbar{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px 16px;
+    padding-bottom:14px;
+    margin-bottom:24px;
+    border-bottom:1px solid var(--line);
+  }
+  .tabbar .whoami{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .tabs{ display:flex; flex-wrap:wrap; gap:6px; }
+  .tab{
+    background:none;
+    border:1px solid transparent;
+    font-family:'Inter',sans-serif;
+    font-size:13.5px;
+    font-weight:600;
+    color:var(--ink-soft);
+    cursor:pointer;
+    padding:8px 14px;
+    border-radius:100px;
+    white-space:nowrap;
+  }
+  .tab:hover{ color:var(--ink); border-color:var(--line); }
+  .tab.active{
+    background:var(--gold-soft);
+    color:var(--ink);
+  }
+  .tab.signout{ color:var(--danger); }
+  .tab.signout:hover{ color:#7A362E; border-color:#F0D8D4; }
+  .navlink{
+    background:none;
+    border:none;
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    color:var(--ink-soft);
+    cursor:pointer;
+    padding:6px 0;
+    text-decoration:underline;
+    text-decoration-color:var(--line);
+    text-underline-offset:3px;
+    white-space:nowrap;
+  }
+  .navlink:hover{ color:var(--ink); text-decoration-color:var(--ink-soft); }
+
+  .error-banner{
+    background:#F7E8E4;
+    border:1px solid var(--danger);
+    color:#7A362E;
+    border-radius:6px;
+    padding:12px 14px;
+    font-size:13.5px;
+    margin-bottom:16px;
+    line-height:1.5;
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    align-items:flex-start;
+  }
+  .error-banner button{
+    background:none; border:none; color:#7A362E; cursor:pointer; font-size:13px;
+    text-decoration:underline; flex:none;
+  }
+
+  /* ---- calendar ---- */
+  .cal-nav{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:10px;
+  }
+  .cal-nav .month-label{
+    font-family:'Source Serif 4', serif;
+    font-size:18px;
+    font-weight:600;
+  }
+  .cal-nav-btns{ display:flex; gap:6px; }
+  .cal-nav-btns button{
+    background:var(--white);
+    border:1px solid var(--line);
+    width:30px; height:30px;
+    border-radius:5px;
+    cursor:pointer;
+    font-size:15px;
+    color:var(--ink);
+    line-height:1;
+  }
+  .cal-nav-btns button:hover{ border-color:var(--ink-soft); }
+
+  .cal-grid{
+    display:grid;
+    grid-template-columns:repeat(7,1fr);
+    gap:3px;
+    margin-bottom:4px;
+  }
+  .cal-dow{
+    text-align:center;
+    font-size:11px;
+    color:var(--ink-soft);
+    padding-bottom:6px;
+  }
+  .cal-cell{
+    background:var(--white);
+    border:1px solid var(--line);
+    border-radius:6px;
+    min-height:52px;
+    padding:5px 5px 6px;
+    cursor:pointer;
+    text-align:left;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    font-family:'Inter',sans-serif;
+  }
+  .cal-cell.empty{
+    background:transparent;
+    border-color:transparent;
+    cursor:default;
+  }
+  .cal-cell .num{
+    font-size:12.5px;
+    color:var(--ink-soft);
+  }
+  .cal-cell.today .num{
+    color:var(--white);
+    background:var(--ink);
+    width:19px;height:19px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .cal-cell.selected{
+    border-color:var(--ink);
+    box-shadow:inset 0 0 0 1px var(--ink);
+  }
+  .cal-cell.has-slots:hover{ border-color:var(--ink-soft); }
+  .cal-cell.past{
+    background:var(--gold-soft);
+    opacity:0.6;
+    cursor:not-allowed;
+    pointer-events:none;
+  }
+  .cal-dots{ display:flex; gap:3px; flex-wrap:wrap; }
+  .cal-dots span{ width:6px;height:6px;border-radius:50%; position:relative; }
+  .cal-dots span.full::after{
+    content:'';
+    position:absolute;
+    top:50%; left:-1.5px; right:-1.5px;
+    height:1.5px;
+    background:var(--ink);
+    transform:translateY(-50%) rotate(-45deg);
+  }
+  .cal-dots .more{ font-size:9.5px; color:var(--ink-soft); }
+  .export-row{ margin-top:14px; }
+
+  @media (max-width:420px){
+    .cal-cell{ min-height:42px; padding:4px; }
+    .cal-dow{ font-size:9.5px; }
+  }
+
+  /* ---- day panel ---- */
+  .day-panel{ margin-top:22px; }
+  .day-panel-heading{
+    font-family:'Source Serif 4', serif;
+    font-size:19px;
+    font-weight:600;
+    padding-bottom:10px;
+    border-bottom:1px solid var(--line);
+    margin-bottom:4px;
+  }
+  .past-note{
+    color:var(--ink-soft);
+    font-size:13px;
+    padding:10px 0;
+  }
+
+  .slot-row{
+    padding:14px 0 16px;
+    border-bottom:1px dashed var(--line);
+  }
+  .slot-row:last-child{ border-bottom:none; }
+  .slot-top{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+  }
+  .role-tag{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    font-weight:600;
+    font-size:15px;
+  }
+  .dot{
+    width:9px;height:9px;border-radius:50%;
+    flex:none;
+  }
+  .slot-time{
+    color:var(--ink-soft);
+    font-size:13.5px;
+  }
+  .fill-status{
+    font-size:13px;
+    color:var(--ink-soft);
+    white-space:nowrap;
+  }
+  .fill-status.full{ color:var(--sage); font-weight:600; }
+  .fill-status.mine{
+    color:var(--ink);
+    font-weight:600;
+    display:inline-block;
+    background:var(--gold-soft);
+    padding:4px 10px;
+    border-radius:100px;
+  }
+
+  .cal-export{ margin-top:6px; }
+  .cal-export-menu{
+    margin-top:6px;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+    border:1px solid var(--line);
+    border-radius:6px;
+    background:var(--white);
+    padding:6px;
+    max-width:220px;
+  }
+  .cal-export-menu a, .cal-export-menu button{
+    display:block;
+    text-align:left;
+    background:none;
+    border:none;
+    color:var(--ink);
+    text-decoration:none;
+    font-family:'Inter',sans-serif;
+    font-size:13px;
+    padding:7px 8px;
+    border-radius:4px;
+    cursor:pointer;
+  }
+  .cal-export-menu a:hover, .cal-export-menu button:hover{ background:var(--gold-soft); }
+
+  .capacity-dots{ display:flex; gap:4px; margin-top:6px; }
+  .capacity-dots span{
+    width:7px;height:7px;border-radius:50%;
+    background:var(--line);
+  }
+  .capacity-dots span.on{ background:var(--gold); }
+
+  .names{
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+    margin-top:10px;
+  }
+  .note-list{
+    margin-top:8px;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+  }
+  .note-line{
+    font-size:12.5px;
+    color:var(--ink-soft);
+    line-height:1.4;
+    background:var(--gold-soft);
+    border-radius:6px;
+    padding:6px 10px;
+  }
+  .note-line strong{ color:var(--ink); font-weight:600; }
+  .chip{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    background:var(--gold-soft);
+    border:1px solid var(--line);
+    border-radius:100px;
+    padding:4px 11px;
+    font-size:13px;
+  }
+  .chip.mine{ background:var(--white); border-color:var(--slate); padding-right:6px; }
+  .chip.admin-removable{ background:var(--white); border-color:var(--ink-soft); padding-right:6px; }
+  .admin-assign{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+  .admin-assign select{
+    font-family:'Inter',sans-serif;
+    font-size:13px;
+    padding:7px 8px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+  }
+  .chip button{
+    background:none;
+    border:none;
+    color:var(--ink-soft);
+    cursor:pointer;
+    font-size:13px;
+    line-height:1;
+    padding:2px 4px;
+    border-radius:50%;
+  }
+  .chip button:hover{ color:var(--danger); }
+  .chip.confirming{ background:var(--white); border-color:var(--danger); }
+  .confirm-inline{
+    display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-soft);
+  }
+  .confirm-inline button{
+    border:none; background:none; cursor:pointer; font-weight:600; font-size:12.5px; padding:0;
+  }
+  .confirm-inline .yes{ color:var(--danger); }
+  .confirm-inline .no{ color:var(--ink-soft); text-decoration:underline; }
+
+  .signup-btn{
+    margin-top:10px;
+    background:var(--ink);
+    color:var(--white);
+    border:none;
+    padding:8px 16px;
+    border-radius:5px;
+    font-size:13.5px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  .signup-btn:hover{ background:#0F3620; }
+  .signup-btn:disabled{ background:var(--line); color:var(--ink-soft); cursor:default; }
+
+  .inline-form{
+    margin-top:10px;
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  input[type=text], input[type=number], input[type=time], input[type=password], input[type=email], input[type=date], select, textarea{
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    padding:8px 10px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+  }
+  textarea{ width:100%; resize:vertical; }
+  input[type=text]:focus, input[type=number]:focus, input[type=time]:focus, input[type=password]:focus, input[type=email]:focus, input[type=date]:focus, select:focus, textarea:focus{
+    outline:2px solid var(--slate);
+    outline-offset:1px;
+  }
+  .inline-form input[type=text]{ flex:1; min-width:140px; }
+
+  .btn{
+    background:var(--ink);
+    color:var(--white);
+    border:none;
+    padding:8px 14px;
+    border-radius:5px;
+    font-size:13.5px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  .btn:hover{ background:#0F3620; }
+  .btn.secondary{
+    background:none;
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  .btn.secondary:hover{ border-color:var(--ink-soft); }
+  .btn.danger{ background:var(--danger); }
+  .btn.danger:hover{ background:#8a3d35; }
+  .btn:disabled{ background:var(--line); color:var(--ink-soft); cursor:default; }
+
+  .empty{
+    padding:40px 10px;
+    text-align:center;
+    color:var(--ink-soft);
+    font-size:14.5px;
+    border-top:1px solid var(--line);
+    margin-top:20px;
+  }
+
+  /* ---- two-column layout (schedule + announcements) ---- */
+  .page-grid{
+    display:grid;
+    grid-template-columns:1fr 300px;
+    gap:32px;
+    align-items:start;
+  }
+  .main-col{ min-width:0; }
+  .side-col{ min-width:0; }
+  @media (max-width:800px){
+    .page-grid{ grid-template-columns:1fr; }
+  }
+
+  .sidebar-card{
+    background:var(--white);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:18px;
+  }
+  .sidebar-title{
+    font-family:'Source Serif 4', serif;
+    font-size:18px;
+    font-weight:600;
+    margin:0 0 14px;
+  }
+  .announcement-card{
+    padding:14px 0;
+    border-top:1px solid var(--line);
+  }
+  .announcement-card:first-of-type{ border-top:none; padding-top:0; }
+  .announcement-title{
+    font-weight:700;
+    font-size:14.5px;
+    margin-bottom:4px;
+  }
+  .announcement-body{
+    font-size:13.5px;
+    color:var(--ink);
+    white-space:pre-wrap;
+    line-height:1.5;
+    margin-bottom:6px;
+  }
+  .announcement-meta{
+    font-size:12px;
+    color:var(--ink-soft);
+  }
+  .announcement-actions{
+    display:flex;
+    gap:12px;
+    margin-top:8px;
+  }
+  .announcement-form{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-bottom:14px;
+  }
+  .announcement-form input, .announcement-form textarea{
+    width:100%;
+    font-family:'Inter',sans-serif;
+    font-size:13.5px;
+    padding:8px 10px;
+    border-radius:5px;
+    border:1px solid var(--line);
+    background:var(--white);
+    color:var(--ink);
+    resize:vertical;
+  }
+  .announcement-form textarea:focus, .announcement-form input:focus{
+    outline:2px solid var(--slate);
+    outline-offset:1px;
+  }
+
+  /* ---- admin ---- */
+  .admin-section{ margin-bottom:36px; }
+  .admin-section h2{
+    font-family:'Source Serif 4', serif;
+    font-size:20px;
+    font-weight:600;
+    margin:0 0 4px;
+  }
+  .admin-section .sub{
+    color:var(--ink-soft);
+    font-size:13.5px;
+    margin:0 0 14px;
+  }
+  .form-error{
+    color:var(--danger);
+    font-size:13px;
+    margin:2px 0 10px;
+  }
+  .field-row{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    align-items:center;
+    margin-bottom:10px;
+  }
+  .field-row label{
+    font-size:13px;
+    color:var(--ink-soft);
+    display:block;
+    margin-bottom:4px;
+  }
+  .field{ display:flex; flex-direction:column; }
+
+  .role-list, .slot-list, .user-list{ margin-top:14px; }
+  .role-item, .slot-item, .user-item{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:10px 0;
+    border-bottom:1px solid var(--line);
+    font-size:14px;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .role-item .left, .slot-item .left, .user-item .left{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .user-item .left{ flex-direction:column; align-items:flex-start; gap:1px; }
+  .user-item .uname{ color:var(--ink-soft); font-size:12.5px; }
+  .slot-desc{
+    color:var(--ink-soft);
+    font-size:12.5px;
+    margin-top:3px;
+    line-height:1.4;
+  }
+  .row-actions{ display:flex; gap:12px; align-items:center; }
+  .swatch{
+    width:14px;height:14px;border-radius:50%;flex:none;
+  }
+  .color-picker{ display:flex; gap:6px; }
+  .color-picker button{
+    width:22px;height:22px;border-radius:50%;
+    border:2px solid transparent;
+    cursor:pointer;
+  }
+  .color-picker button.selected{ border-color:var(--ink); }
+
+  .credential-banner{
+    background:var(--gold-soft);
+    border:1px solid var(--gold);
+    border-radius:6px;
+    padding:12px 14px;
+    font-size:13.5px;
+    margin-bottom:16px;
+    line-height:1.6;
+  }
+  .credential-banner strong{ font-weight:700; }
+  .credential-banner .dismiss{ margin-top:8px; }
+
+  .auth-box{
+    max-width:340px;
+    margin:50px auto;
+    text-align:center;
+  }
+  .auth-box h2{
+    font-family:'Source Serif 4', serif;
+    font-size:22px;
+    margin-bottom:4px;
+  }
+  .auth-box p{ color:var(--ink-soft); font-size:14px; margin-bottom:18px;}
+  .auth-box .field{ text-align:left; }
+  .auth-box input.wide{ width:100%; text-align:left; letter-spacing:normal; }
+  .auth-error{ color:var(--danger); font-size:13px; margin-top:8px; min-height:18px; }
+  .auth-success{ color:var(--sage); font-size:13px; margin-top:8px; }
+
+  .loading{ text-align:center; padding:60px 0; color:var(--ink-soft); font-size:14px; }
+  .small-link{
+    background:none; border:none; color:var(--ink-soft); text-decoration:underline;
+    cursor:pointer; font-size:12.5px; padding:0; font-family:'Inter',sans-serif;
+  }
+  .checkbox-row{
+    display:flex; align-items:center; gap:6px; margin:2px 0 10px;
+  }
+  .checkbox-row input{ width:auto; }
+  .checkbox-row label{ font-size:13px; color:var(--ink-soft); cursor:pointer; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="loading">Loading…</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script>
+// =====================================================================
+// Fill these in from Supabase → Project Settings → API before deploying.
+// =====================================================================
+const SUPABASE_URL = 'https://owyvjdvapgjycwmktmcq.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_hGU88JRIZTxoELSqWiTmDw_rYyPY5CC';
+
+const sb = SUPABASE_URL.startsWith('http')
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+const PALETTE = ['#1B4D2E','#3C7A52','#0C2340','#8C7535','#A24C42','#2F6B6B'];
+const LOGO_DATA_URI = 'data:image/png;base64,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';
+
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const DOW_SHORT = ['S','M','T','W','T','F','S'];
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+const today = new Date(); today.setHours(0,0,0,0);
+
+let state = {
+  loaded:false,
+  view:'login', // login | register | forgot | reset | signup | changepass | admin
+  session:null,
+  profile:null,          // {id, name, is_admin} for the signed-in user
+  profiles:[],           // all profiles, for name lookups + admin roster
+  churchName:'Our Church',
+  roles:[],
+  slots:[],
+  signups:[],            // [{id, slot_id, user_id, signup_date}]
+
+  calendarMonth:new Date(today.getFullYear(), today.getMonth(), 1),
+  selectedDate:new Date(today),
+  confirmTarget:null,
+  calendarMenuFor:null,
+  openSignupFor:null,
+  noteDraft:'',
+  exportingMonth:false,
+  exportError:'',
+  slotActionError:'',
+  errorBanner:null,
+
+  loginEmail:'', loginPassword:'', loginError:'',
+  regName:'', regEmail:'', regPassword:'', regError:'', regNotice:'',
+  forgotEmail:'', forgotError:'', forgotSuccess:'',
+  resetPassword:'', resetError:'', resetSuccess:'',
+  cpNew:'', cpConfirm:'', cpError:'', cpSuccess:'',
+
+  newRoleName:'', newRoleColor:PALETTE[0], roleFormError:'',
+  newSlot:{roleId:'', day:'0', start:'09:00', end:'10:00', capacity:3, description:''}, slotFormError:'',
+  newOneOff:{roleId:'', date:'', start:'09:00', end:'10:00', capacity:3, description:''}, oneOffFormError:'',
+  editingSlotId:null, editSlot:null, editSlotError:'',
+  newChurchName:'', churchNameError:'',
+  userFormError:'',
+
+  announcements:[],
+  showAnnouncementForm:false,
+  newAnnouncementTitle:'', newAnnouncementBody:'', announcementFormError:'',
+  editingAnnouncementId:null, editAnnouncementTitle:'', editAnnouncementBody:'', editAnnouncementError:''
+};
+
+function uid(){ return Math.random().toString(36).slice(2,10); } // for DOM-only helper ids, not DB rows
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s){ return escapeHtml(s).replace(/'/g,'&#39;'); }
+
+function fmtTime(t){
+  const [h,m] = t.split(':').map(Number);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12; if(h12===0) h12=12;
+  return `${h12}:${String(m).padStart(2,'0')} ${ampm}`;
+}
+function isoDate(d){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function sameDate(a,b){ return isoDate(a)===isoDate(b); }
+function fmtDateLong(d){ return d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' }); }
+function fmtDateWithYear(d){ return d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' }); }
+
+function roleById(id){ return state.roles.find(r=>r.id===id); }
+function profileById(id){ return state.profiles.find(p=>p.id===id); }
+function profileName(id){ const p = profileById(id); return p ? p.name : '(former volunteer)'; }
+
+function slotsForDate(d){
+  const dow = d.getDay();
+  const iso = isoDate(d);
+  return state.slots
+    .filter(s => s.specific_date ? s.specific_date === iso : Number(s.day) === dow)
+    .map(slot=>({ slot, role:roleById(slot.role_id) }))
+    .filter(x=>!!x.role)
+    .sort((a,b)=>a.slot.start_time.localeCompare(b.slot.start_time));
+}
+function signupsFor(slotId, iso){
+  return state.signups.filter(s=>s.slot_id===slotId && s.signup_date===iso);
+}
+
+function showError(err, fallback){
+  state.errorBanner = (err && err.message) ? err.message : (fallback || 'Something went wrong.');
+}
+
+// ---------- AUTH BOOTSTRAP ----------
+
+async function init(){
+  if(!sb){
+    state.loaded = true;
+    state.errorBanner = "This app isn't connected to a database yet — a developer needs to add the Supabase URL and key near the top of the file.";
+    render();
+    return;
+  }
+
+  sb.auth.onAuthStateChange((event, session) => {
+    state.session = session;
+    if(event === 'PASSWORD_RECOVERY'){
+      state.view = 'reset';
+      render();
+      return;
+    }
+    if(event === 'SIGNED_OUT'){
+      state.profile = null;
+      state.view = 'login';
+      render();
+      return;
+    }
+    if(session && (state.view==='login' || state.view==='register')){
+      loadForSession();
+    }
+  });
+
+  // Fetch the church name for the signed-out login/register screens too.
+  // This is safe to attempt before auth as long as `church_settings` has a
+  // public-read policy (see the SQL note); if it doesn't yet, this just
+  // fails quietly and the "Our Church" fallback is used instead.
+  await fetchChurchNamePublic();
+
+  const { data:{ session } } = await sb.auth.getSession();
+  state.session = session;
+  if(session){
+    await loadForSession();
+  } else {
+    state.loaded = true;
+    render();
+  }
+}
+
+async function fetchChurchNamePublic(){
+  try{
+    const { data, error } = await sb.from('church_settings').select('church_name').maybeSingle();
+    if(error) throw error;
+    if(data && data.church_name) state.churchName = data.church_name;
+  }catch(e){
+    // Graceful fallback: keep whatever state.churchName already is
+    // (the "Our Church" default) if this table isn't publicly readable yet.
+  }
+}
+
+async function loadForSession(){
+  await fetchAll();
+  state.loaded = true;
+  if(state.view==='login' || state.view==='register') state.view = 'signup';
+  render();
+}
+
+async function fetchAll(){
+  if(!state.session) return;
+  try{
+    const [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes, announcementsRes] = await Promise.all([
+      sb.from('roles').select('*').order('name'),
+      sb.from('slots').select('*'),
+      sb.from('signups').select('id, slot_id, user_id, signup_date, note'),
+      sb.from('church_settings').select('church_name').maybeSingle(),
+      sb.from('profiles').select('id, name, is_admin').order('name'),
+      sb.from('profiles').select('id, name, is_admin').eq('id', state.session.user.id).maybeSingle(),
+      sb.from('announcements').select('id, title, body, author_id, created_at').order('created_at', { ascending:false })
+    ]);
+    for(const r of [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes, announcementsRes]){
+      if(r.error) throw r.error;
+    }
+    state.roles = rolesRes.data || [];
+    state.slots = slotsRes.data || [];
+    state.signups = signupsRes.data || [];
+    state.churchName = (settingsRes.data && settingsRes.data.church_name) || 'Our Church';
+    state.profiles = profilesRes.data || [];
+    state.profile = myProfileRes.data || null;
+    state.announcements = announcementsRes.data || [];
+
+    // Self-heal: a signed-in user with no matching `profiles` row (e.g. an
+    // account created before the signup trigger existed) would otherwise
+    // hang forever on "Loading your profile…". Create the missing row here.
+    if(!state.profile){
+      const isFirst = state.profiles.length === 0;
+      const fallbackName = (state.session.user.user_metadata && state.session.user.user_metadata.name)
+        || (state.session.user.email ? state.session.user.email.split('@')[0] : 'Volunteer');
+      const { data: created, error: createErr } = await sb.from('profiles')
+        .insert({ id: state.session.user.id, name: fallbackName, is_admin: isFirst })
+        .select('id, name, is_admin')
+        .single();
+      if(createErr) throw createErr;
+      state.profile = created;
+      state.profiles.push(created);
+      state.profiles.sort((a,b)=>a.name.localeCompare(b.name));
+    }
+
+    state.errorBanner = null;
+  }catch(e){
+    showError(e, 'Could not load the schedule from the database.');
+  }
+}
+
+// ---------- AUTH ACTIONS ----------
+
+async function login(){
+  state.loginError = '';
+  const email = state.loginEmail.trim();
+  const password = state.loginPassword;
+  if(!email || !password){ state.loginError = 'Enter your email and password.'; render(); return; }
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){ state.loginError = error.message; render(); return; }
+  state.session = data.session;
+  state.loginEmail=''; state.loginPassword='';
+  await loadForSession();
+}
+
+async function registerAccount(){
+  state.regError = ''; state.regNotice = '';
+  const name = state.regName.trim();
+  const email = state.regEmail.trim();
+  const password = state.regPassword;
+  if(!name){ state.regError = 'Enter your name.'; render(); return; }
+  if(!email){ state.regError = 'Enter your email.'; render(); return; }
+  if(!password || password.length < 6){ state.regError = 'Password must be at least 6 characters.'; render(); return; }
+  const { data, error } = await sb.auth.signUp({
+    email, password,
+    options:{ data:{ name } }
+  });
+  if(error){ state.regError = error.message; render(); return; }
+  state.regName=''; state.regEmail=''; state.regPassword='';
+  if(data.session){
+    state.session = data.session;
+    await loadForSession();
+  } else {
+    state.regNotice = 'Account created! Check your email to confirm it, then sign in.';
+    state.view = 'login';
+    render();
+  }
+}
+
+async function logout(){
+  await sb.auth.signOut();
+  state.session = null;
+  state.profile = null;
+  state.view = 'login';
+  render();
+}
+
+async function sendResetEmail(){
+  state.forgotError=''; state.forgotSuccess='';
+  const email = state.forgotEmail.trim();
+  if(!email){ state.forgotError = 'Enter your email.'; render(); return; }
+  const { error } = await sb.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin + window.location.pathname
+  });
+  if(error){ state.forgotError = error.message; render(); return; }
+  state.forgotSuccess = 'Check your email for a password reset link.';
+  render();
+}
+
+async function submitNewPassword(){
+  state.resetError='';
+  const password = state.resetPassword;
+  if(!password || password.length < 6){ state.resetError = 'Password must be at least 6 characters.'; render(); return; }
+  const { error } = await sb.auth.updateUser({ password });
+  if(error){ state.resetError = error.message; render(); return; }
+  state.resetSuccess = 'Password updated — taking you to the schedule…';
+  state.resetPassword = '';
+  render();
+  setTimeout(async ()=>{ state.view='signup'; await loadForSession(); }, 1200);
+}
+
+async function changePassword(){
+  state.cpError=''; state.cpSuccess='';
+  if(!state.cpNew || state.cpNew.length < 6){ state.cpError = 'New password must be at least 6 characters.'; render(); return; }
+  if(state.cpNew !== state.cpConfirm){ state.cpError = 'Passwords do not match.'; render(); return; }
+  const { error } = await sb.auth.updateUser({ password: state.cpNew });
+  if(error){ state.cpError = error.message; render(); return; }
+  state.cpSuccess = 'Password changed.';
+  state.cpNew=''; state.cpConfirm='';
+  render();
+}
+
+// ---------- CALENDAR / SIGN-UPS ----------
+
+function changeMonth(delta){
+  const d = state.calendarMonth;
+  state.calendarMonth = new Date(d.getFullYear(), d.getMonth()+delta, 1);
+  render();
+}
+function selectDate(y,m,day){
+  state.selectedDate = new Date(y,m,day);
+  state.confirmTarget = null;
+  state.slotActionError = '';
+  render();
+}
+
+function openSignupForm(key){
+  state.openSignupFor = key;
+  state.noteDraft = '';
+  state.slotActionError = '';
+  render();
+}
+function closeSignupForm(){
+  state.openSignupFor = null;
+  state.noteDraft = '';
+  render();
+}
+
+async function submitSignup(slotId, iso, capacity){
+  state.slotActionError = '';
+  const myId = state.session.user.id;
+  if(state.signups.some(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===myId)) return;
+  if(signupsFor(slotId, iso).length >= capacity) return; // fast client-side check; the database is the real guard
+  const note = (state.noteDraft || '').trim() || null;
+  const { data, error } = await sb.from('signups')
+    .insert({ slot_id: slotId, user_id: myId, signup_date: iso, note })
+    .select('id, slot_id, user_id, signup_date, note')
+    .single();
+  if(error){ state.slotActionError = error.message; render(); return; }
+  state.signups.push(data);
+  state.openSignupFor = null;
+  state.noteDraft = '';
+  render();
+}
+function askRemoveSignup(target){ state.confirmTarget = target; render(); }
+async function removeSignup(id){
+  const { error } = await sb.from('signups').delete().eq('id', id);
+  if(error){ state.slotActionError = error.message; render(); return; }
+  state.signups = state.signups.filter(s=>s.id!==id);
+  state.confirmTarget = null;
+  render();
+}
+
+// Admin-only: assign a specific volunteer to a slot instance on their behalf.
+async function adminAssignSignup(slotId, iso, capacity, profileId){
+  state.slotActionError = '';
+  if(!profileId){ state.slotActionError = 'Choose a volunteer to assign.'; render(); return; }
+  if(state.signups.some(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===profileId)){
+    state.slotActionError = 'That person is already signed up for this.'; render(); return;
+  }
+  if(signupsFor(slotId, iso).length >= capacity){
+    state.slotActionError = 'This slot is already full.'; render(); return;
+  }
+  const { data, error } = await sb.from('signups')
+    .insert({ slot_id: slotId, user_id: profileId, signup_date: iso, note: null })
+    .select('id, slot_id, user_id, signup_date, note')
+    .single();
+  if(error){ state.slotActionError = error.message; render(); return; }
+  state.signups.push(data);
+  render();
+}
+
+// Admin-only: look up a volunteer's email via a security-definer RPC (the
+// profiles table itself never stores or exposes email addresses), then open
+// a pre-filled mailto: link with the date, time, and role of their assignment.
+async function emailVolunteer(userId, slotId, iso){
+  state.slotActionError = '';
+  const slot = state.slots.find(s=>s.id===slotId);
+  const role = slot ? roleById(slot.role_id) : null;
+  if(!slot || !role){ state.slotActionError = 'Could not find that slot.'; render(); return; }
+  try{
+    const { data, error } = await sb.rpc('admin_get_volunteer_email', { target_id: userId });
+    if(error) throw error;
+    if(!data){ state.slotActionError = "Couldn't find an email address for that volunteer."; render(); return; }
+    const d = parseIsoLocal(iso);
+    const dateStr = fmtDateWithYear(d);
+    const timeStr = `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`;
+    const subject = encodeURIComponent(`Your volunteer assignment: ${role.name} on ${dateStr}`);
+    const body = encodeURIComponent(`Hi,\n\nYou're scheduled to volunteer as ${role.name} on ${dateStr} from ${timeStr}.\n\nThanks for helping out!\n\n— ${state.churchName}`);
+    window.location.href = `mailto:${data}?subject=${subject}&body=${body}`;
+  }catch(e){
+    state.slotActionError = (e && e.message) || 'Could not look up that email address.';
+    render();
+  }
+}
+
+// ---------- CALENDAR EXPORT (Google Calendar / iCal) ----------
+
+function toggleCalendarMenu(key){
+  state.calendarMenuFor = (state.calendarMenuFor === key) ? null : key;
+  render();
+}
+
+function gcalDateStr(dateObj, timeStr){
+  const [h,m] = timeStr.split(':').map(Number);
+  const y = dateObj.getFullYear(), mo = String(dateObj.getMonth()+1).padStart(2,'0'), da = String(dateObj.getDate()).padStart(2,'0');
+  return `${y}${mo}${da}T${String(h).padStart(2,'0')}${String(m).padStart(2,'0')}00`;
+}
+function buildGoogleCalendarUrl(role, slot, dateObj, note){
+  const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC';
+  const start = gcalDateStr(dateObj, slot.start_time);
+  const end = gcalDateStr(dateObj, slot.end_time);
+  const title = `${role.name} — ${state.churchName}`;
+  let details = `Volunteering as ${role.name} for ${state.churchName}.`;
+  if(note) details += `\n\nNote: ${note}`;
+  const params = new URLSearchParams({
+    action:'TEMPLATE',
+    text:title,
+    dates:`${start}/${end}`,
+    details,
+    location:state.churchName,
+    ctz:tz
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function icsDateStr(dateObj, timeStr){
+  const [h,m] = timeStr.split(':').map(Number);
+  const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate(), h, m, 0);
+  return dt.toISOString().replace(/[-:]/g,'').split('.')[0] + 'Z';
+}
+function escapeICS(s){
+  return String(s||'').replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n');
+}
+function downloadICS(role, slot, dateObj, note){
+  const iso = isoDate(dateObj);
+  const dtStart = icsDateStr(dateObj, slot.start_time);
+  const dtEnd = icsDateStr(dateObj, slot.end_time);
+  const dtStamp = new Date().toISOString().replace(/[-:]/g,'').split('.')[0] + 'Z';
+  const summary = escapeICS(`${role.name} — ${state.churchName}`);
+  let descriptionText = `Volunteering as ${role.name} for ${state.churchName}.`;
+  if(note) descriptionText += `\n\nNote: ${note}`;
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Volunteer Sign-Up//EN',
+    'CALSCALE:GREGORIAN',
+    'BEGIN:VEVENT',
+    `UID:${slot.id}-${iso}@volunteer-signup`,
+    `DTSTAMP:${dtStamp}`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${summary}`,
+    `DESCRIPTION:${escapeICS(descriptionText)}`,
+    `LOCATION:${escapeICS(state.churchName)}`,
+    'END:VEVENT',
+    'END:VCALENDAR'
+  ].join('\r\n');
+  const blob = new Blob([ics], { type:'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${role.name.replace(/[^a-z0-9]+/gi,'-')}-${iso}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+
+function parseIsoLocal(iso){
+  const [y,m,dd] = iso.split('-').map(Number);
+  return new Date(y, m-1, dd);
+}
+function triggerICSDownload(slotId, iso){
+  const slot = state.slots.find(s=>s.id===slotId);
+  if(!slot) return;
+  const role = roleById(slot.role_id);
+  if(!role) return;
+  const mySignup = state.signups.find(s=>s.slot_id===slotId && s.signup_date===iso && s.user_id===state.session.user.id);
+  downloadICS(role, slot, parseIsoLocal(iso), mySignup ? mySignup.note : '');
+}
+
+// ---------- MONTH EXPORT (Excel) ----------
+
 async function exportMonthExcel(){
   state.exportError = '';
   if(typeof ExcelJS === 'undefined'){
