@@ -231,6 +231,7 @@
     transform:translateY(-50%) rotate(-45deg);
   }
   .cal-dots .more{ font-size:9.5px; color:var(--ink-soft); }
+  .export-row{ margin-top:14px; }
 
   @media (max-width:420px){
     .cal-cell{ min-height:42px; padding:4px; }
@@ -655,6 +656,7 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script>
 // =====================================================================
 // Fill these in from Supabase → Project Settings → API before deploying.
@@ -692,6 +694,8 @@ let state = {
   calendarMenuFor:null,
   openSignupFor:null,
   noteDraft:'',
+  exportingMonth:false,
+  exportError:'',
   slotActionError:'',
   errorBanner:null,
 
@@ -1123,6 +1127,143 @@ function triggerICSDownload(slotId, iso){
   downloadICS(role, slot, parseIsoLocal(iso), mySignup ? mySignup.note : '');
 }
 
+// ---------- MONTH EXPORT (Excel) ----------
+
+async function exportMonthExcel(){
+  state.exportError = '';
+  if(typeof ExcelJS === 'undefined'){
+    state.exportError = 'The spreadsheet library failed to load. Check your internet connection and try again.';
+    render();
+    return;
+  }
+  state.exportingMonth = true;
+  render();
+
+  try{
+    const cm = state.calendarMonth;
+    const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
+
+    const rows = [];
+    for(let day=1; day<=numDays; day++){
+      const d = new Date(cm.getFullYear(), cm.getMonth(), day);
+      const iso = isoDate(d);
+      const daySlots = slotsForDate(d);
+      for(const {slot, role} of daySlots){
+        const filled = signupsFor(slot.id, iso);
+        const names = filled.map(e=>profileName(e.user_id)).join(', ');
+        const notesText = filled.filter(e=>e.note).map(e=>`${profileName(e.user_id)}: ${e.note}`).join(' | ');
+        rows.push({
+          date: d,
+          dayName: DAY_NAMES[d.getDay()],
+          role: role.name,
+          time: `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`,
+          capacity: slot.capacity,
+          signedUp: filled.length,
+          openSpots: Math.max(0, slot.capacity - filled.length),
+          volunteers: names || '—',
+          notesText: notesText || '',
+          description: slot.description || ''
+        });
+      }
+    }
+
+    if(rows.length === 0){
+      state.exportError = `There's nothing scheduled in ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} to export.`;
+      state.exportingMonth = false;
+      render();
+      return;
+    }
+
+    rows.sort((a,b)=> a.date - b.date || a.time.localeCompare(b.time));
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = state.churchName;
+    workbook.created = new Date();
+    const sheetName = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}`.slice(0,31);
+    const sheet = workbook.addWorksheet(sheetName);
+
+    const columns = [
+      { header:'Date', key:'date', width:14 },
+      { header:'Day', key:'dayName', width:11 },
+      { header:'Role', key:'role', width:18 },
+      { header:'Time', key:'time', width:20 },
+      { header:'Capacity', key:'capacity', width:10 },
+      { header:'Signed Up', key:'signedUp', width:11 },
+      { header:'Open Spots', key:'openSpots', width:11 },
+      { header:'Volunteers', key:'volunteers', width:32 },
+      { header:'Notes', key:'notesText', width:34 },
+      { header:'Description', key:'description', width:34 }
+    ];
+    // Set widths/keys only — headers are drawn manually in row 3 below,
+    // so ExcelJS shouldn't auto-reserve row 1 for its own header row.
+    sheet.columns = columns.map(c=>({ key:c.key, width:c.width }));
+
+    // Row 1: title banner
+    sheet.mergeCells(1,1,1,columns.length);
+    const titleCell = sheet.getCell('A1');
+    titleCell.value = `${state.churchName} — Volunteer Schedule`;
+    titleCell.font = { bold:true, size:16, color:{ argb:'FFFFFFFF' } };
+    titleCell.alignment = { vertical:'middle', horizontal:'left' };
+    sheet.getRow(1).height = 28;
+    sheet.getRow(1).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF16311F' } }; });
+
+    // Row 2: subtitle
+    sheet.mergeCells(2,1,2,columns.length);
+    const subtitleCell = sheet.getCell('A2');
+    subtitleCell.value = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}  ·  Exported ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
+    subtitleCell.font = { italic:true, size:11, color:{ argb:'FF16311F' } };
+    sheet.getRow(2).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFE1EBDE' } }; });
+
+    // Row 3: column headers
+    const headerRow = sheet.getRow(3);
+    columns.forEach((col,i)=>{ headerRow.getCell(i+1).value = col.header; });
+    headerRow.eachCell({ includeEmpty:true }, c=>{
+      c.font = { bold:true, color:{ argb:'FFFFFFFF' } };
+      c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1B4D2E' } };
+      c.alignment = { vertical:'middle', horizontal:'center' };
+    });
+    headerRow.height = 20;
+    sheet.autoFilter = { from:{ row:3, column:1 }, to:{ row:3, column:columns.length } };
+    sheet.views = [{ state:'frozen', ySplit:3 }];
+
+    // Data rows
+    rows.forEach((r, idx)=>{
+      const row = sheet.addRow(r);
+      row.getCell(1).numFmt = 'mmm d, yyyy';
+      row.eachCell({ includeEmpty:true }, c=>{
+        c.alignment = { vertical:'top', wrapText:true };
+        c.border = { bottom:{ style:'hair', color:{ argb:'FFDCD5C0' } } };
+      });
+      if(idx % 2 === 1){
+        row.eachCell({ includeEmpty:true }, c=>{
+          c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFF6F9F5' } };
+        });
+      }
+      const openCell = row.getCell(7);
+      openCell.font = r.openSpots > 0
+        ? { bold:true, color:{ argb:'FFA24C42' } }
+        : { bold:true, color:{ argb:'FF1B4D2E' } };
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeChurch = state.churchName.replace(/[^a-z0-9]+/gi,'-');
+    a.href = url;
+    a.download = `${safeChurch}-schedule-${MONTH_NAMES[cm.getMonth()]}-${cm.getFullYear()}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 3000);
+  }catch(e){
+    state.exportError = (e && e.message) || 'Could not generate the spreadsheet.';
+  }finally{
+    state.exportingMonth = false;
+    render();
+  }
+}
+
 function renderCalendar(){
   const cm = state.calendarMonth;
   const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
@@ -1157,6 +1298,7 @@ function renderCalendar(){
   }
 
   const dow = DOW_SHORT.map(s=>`<div class="cal-dow">${s}</div>`).join('');
+  const isAdminViewer = !!(state.profile && state.profile.is_admin);
 
   return `
     <div class="cal-nav">
@@ -1167,6 +1309,14 @@ function renderCalendar(){
       </div>
     </div>
     <div class="cal-grid">${dow}${cells}</div>
+    ${isAdminViewer ? `
+      <div class="export-row">
+        <button class="btn secondary" ${state.exportingMonth?'disabled':''} onclick="exportMonthExcel()">
+          ${state.exportingMonth ? 'Preparing spreadsheet…' : `Export ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} (.xlsx)`}
+        </button>
+        ${state.exportError ? `<div class="form-error" style="margin-top:8px">${escapeHtml(state.exportError)}</div>` : ''}
+      </div>
+    ` : ''}
   `;
 }
 
