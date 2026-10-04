@@ -365,6 +365,11 @@
   }
   .chip.mine{ background:var(--white); border-color:var(--slate); padding-right:6px; }
   .chip.admin-removable{ background:var(--white); border-color:var(--ink-soft); padding-right:6px; }
+  .assigned-tag{
+    color:var(--ink-soft);
+    font-size:11.5px;
+    font-style:italic;
+  }
   .admin-assign{
     display:flex;
     gap:8px;
@@ -828,7 +833,7 @@ async function fetchAll(){
     const [rolesRes, slotsRes, signupsRes, settingsRes, profilesRes, myProfileRes, announcementsRes] = await Promise.all([
       sb.from('roles').select('*').order('name'),
       sb.from('slots').select('*'),
-      sb.from('signups').select('id, slot_id, user_id, signup_date, note'),
+      sb.from('signups').select('id, slot_id, user_id, signup_date, note, assigned_by'),
       sb.from('church_settings').select('church_name').maybeSingle(),
       sb.from('profiles').select('id, name, is_admin').order('name'),
       sb.from('profiles').select('id, name, is_admin').eq('id', state.session.user.id).maybeSingle(),
@@ -983,7 +988,7 @@ async function submitSignup(slotId, iso, capacity){
   const note = (state.noteDraft || '').trim() || null;
   const { data, error } = await sb.from('signups')
     .insert({ slot_id: slotId, user_id: myId, signup_date: iso, note })
-    .select('id, slot_id, user_id, signup_date, note')
+    .select('id, slot_id, user_id, signup_date, note, assigned_by')
     .single();
   if(error){ state.slotActionError = error.message; render(); return; }
   state.signups.push(data);
@@ -1012,7 +1017,7 @@ async function adminAssignSignup(slotId, iso, capacity, profileId){
   }
   const { data, error } = await sb.from('signups')
     .insert({ slot_id: slotId, user_id: profileId, signup_date: iso, note: null })
-    .select('id, slot_id, user_id, signup_date, note')
+    .select('id, slot_id, user_id, signup_date, note, assigned_by')
     .single();
   if(error){ state.slotActionError = error.message; render(); return; }
   state.signups.push(data);
@@ -1165,9 +1170,11 @@ async function exportMonthExcel(){
       for(const {slot, role} of daySlots){
         const filled = signupsFor(slot.id, iso);
         for(const e of filled){
+          const fullName = profileName(e.user_id);
           rows.push({
             userId: e.user_id,
-            name: profileName(e.user_id),
+            name: fullName,
+            firstName: (fullName||'').trim().split(/\s+/)[0] || '',
             role: role.name,
             description: slot.description || '',
             date: d,
@@ -1197,6 +1204,7 @@ async function exportMonthExcel(){
 
     const columns = [
       { header:'Name', key:'name', width:22 },
+      { header:'First Name', key:'firstName', width:16 },
       { header:'Email', key:'email', width:28 },
       { header:'Role', key:'role', width:18 },
       { header:'Description', key:'description', width:34 },
@@ -1239,13 +1247,14 @@ async function exportMonthExcel(){
     rows.forEach((r, idx)=>{
       const row = sheet.addRow({
         name: r.name,
+        firstName: r.firstName,
         email: r.email,
         role: r.role,
         description: r.description,
         date: r.date,
         time: r.time
       });
-      row.getCell(5).numFmt = 'mmm d, yyyy'; // Date is the 5th column
+      row.getCell(6).numFmt = 'mmm d, yyyy'; // Date is the 6th column
       row.eachCell({ includeEmpty:true }, c=>{
         c.alignment = { vertical:'top', wrapText:true };
         c.border = { bottom:{ style:'hair', color:{ argb:'FFDCD5C0' } } };
@@ -1364,6 +1373,9 @@ function renderDayPanel(){
         const name = profileName(e.user_id);
         const noteAttr = e.note ? ` title="${escapeAttr(e.note)}"` : '';
         const noteIcon = e.note ? ' <span aria-hidden="true">📝</span>' : '';
+        const assignedTag = (isAdminViewer && e.assigned_by)
+          ? ` <span class="assigned-tag" title="Added by ${escapeAttr(profileName(e.assigned_by))}">· assigned</span>`
+          : '';
         if(!canRemove) return `<span class="chip"${noteAttr}>${escapeHtml(name)}${noteIcon}</span>`;
         const ctarget = `signup:${e.id}`;
         if(state.confirmTarget===ctarget){
@@ -1376,7 +1388,7 @@ function renderDayPanel(){
         }
         const chipClass = isMine ? 'chip mine' : 'chip admin-removable';
         const mailBtn = showMailBtn ? `<button title="Email about this assignment" onclick="emailVolunteer('${e.user_id}','${slot.id}','${iso}')">✉</button>` : '';
-        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}${mailBtn}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
+        return `<span class="${chipClass}"${noteAttr}>${escapeHtml(name)}${noteIcon}${assignedTag}${mailBtn}<button title="${isMine?'Cancel':'Remove (admin)'}" onclick="askRemoveSignup('${ctarget}')">×</button></span>`;
       }).join('')}</div>` : '';
 
       const withNotes = filled.filter(e=>e.note);
