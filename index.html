@@ -1161,7 +1161,9 @@ async function exportMonthExcel(){
   try{
     const cm = state.calendarMonth;
     const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
+    const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
 
+    // ---- Gather one row per volunteer sign-up (feeds both the flat list and the grid) ----
     const rows = [];
     for(let day=1; day<=numDays; day++){
       const d = new Date(cm.getFullYear(), cm.getMonth(), day);
@@ -1202,69 +1204,125 @@ async function exportMonthExcel(){
     const sheetName = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}`.slice(0,31);
     const sheet = workbook.addWorksheet(sheetName);
 
-    const columns = [
+    const DARK = 'FF16311F';
+    const MID_GREEN = 'FF1B4D2E';
+    const LIGHT_GREEN = 'FFE1EBDE';
+    const STRIPE = 'FFF6F9F5';
+    const LINE = 'FFDCD5C0';
+
+    // ---- Columns: A–G flat list, H spacer, I–O day-of-week grid ----
+    const leftColumns = [
       { header:'Name', key:'name', width:22 },
-      { header:'First Name', key:'firstName', width:16 },
+      { header:'First Name', key:'firstName', width:14 },
       { header:'Email', key:'email', width:28 },
-      { header:'Role', key:'role', width:18 },
-      { header:'Description', key:'description', width:34 },
-      { header:'Date', key:'date', width:14 },
+      { header:'Role', key:'role', width:20 },
+      { header:'Description', key:'description', width:32 },
+      { header:'Date', key:'date', width:13 },
       { header:'Time', key:'time', width:20 }
     ];
-    // Set widths/keys only — headers are drawn manually in row 3 below,
-    // so ExcelJS shouldn't auto-reserve row 1 for its own header row.
-    sheet.columns = columns.map(c=>({ key:c.key, width:c.width }));
+    const dayColumns = DAY_NAMES.map(d => ({ header: d.toUpperCase(), width: 14 }));
 
-    // Row 1: title banner
-    sheet.mergeCells(1,1,1,columns.length);
-    const titleCell = sheet.getCell('A1');
-    titleCell.value = `${state.churchName} — Volunteer Schedule`;
-    titleCell.font = { bold:true, size:16, color:{ argb:'FFFFFFFF' } };
-    titleCell.alignment = { vertical:'middle', horizontal:'left' };
-    sheet.getRow(1).height = 28;
-    sheet.getRow(1).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF16311F' } }; });
+    sheet.columns = [
+      ...leftColumns.map(c=>({ key:c.key, width:c.width })),
+      { width:3 },
+      ...dayColumns.map(c=>({ width:c.width }))
+    ];
 
-    // Row 2: subtitle
-    sheet.mergeCells(2,1,2,columns.length);
-    const subtitleCell = sheet.getCell('A2');
-    subtitleCell.value = `${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()}  ·  Exported ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
-    subtitleCell.font = { italic:true, size:11, color:{ argb:'FF16311F' } };
-    sheet.getRow(2).eachCell({ includeEmpty:true }, c=>{ c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFE1EBDE' } }; });
+    // ---- Row 1: two title banners, side by side ----
+    sheet.mergeCells(1,1,1,7);
+    const leftTitle = sheet.getCell(1,1);
+    leftTitle.value = `${state.churchName} — Volunteer Schedule`;
+    leftTitle.font = { bold:true, size:14, color:{ argb:'FFFFFFFF' } };
+    leftTitle.alignment = { vertical:'middle', horizontal:'left' };
 
-    // Row 3: column headers
-    const headerRow = sheet.getRow(3);
-    columns.forEach((col,i)=>{ headerRow.getCell(i+1).value = col.header; });
-    headerRow.eachCell({ includeEmpty:true }, c=>{
-      c.font = { bold:true, color:{ argb:'FFFFFFFF' } };
-      c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1B4D2E' } };
-      c.alignment = { vertical:'middle', horizontal:'center' };
-    });
+    sheet.mergeCells(1,9,1,15);
+    const rightTitle = sheet.getCell(1,9);
+    rightTitle.value = `${MONTH_NAMES[cm.getMonth()].toUpperCase()} ${cm.getFullYear()}`;
+    rightTitle.font = { bold:true, size:14, color:{ argb:'FFFFFFFF' } };
+    rightTitle.alignment = { vertical:'middle', horizontal:'center' };
+
+    sheet.getRow(1).height = 30;
+    for(let c=1; c<=15; c++){
+      if(c===8) continue;
+      sheet.getCell(1,c).fill = { type:'pattern', pattern:'solid', fgColor:{ argb:DARK } };
+    }
+
+    // ---- Row 2: headers for both blocks ----
+    const headerRow = sheet.getRow(2);
+    leftColumns.forEach((col,i)=>{ headerRow.getCell(i+1).value = col.header; });
+    dayColumns.forEach((col,i)=>{ headerRow.getCell(9+i).value = col.header; });
+    for(let c=1; c<=15; c++){
+      if(c===8) continue;
+      const cell = headerRow.getCell(c);
+      cell.font = { bold:true, color:{ argb:'FFFFFFFF' } };
+      cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:MID_GREEN } };
+      cell.alignment = { vertical:'middle', horizontal:'center' };
+    }
     headerRow.height = 20;
-    sheet.autoFilter = { from:{ row:3, column:1 }, to:{ row:3, column:columns.length } };
-    sheet.views = [{ state:'frozen', ySplit:3 }];
+    sheet.autoFilter = { from:{ row:2, column:1 }, to:{ row:2, column:7 } };
+    sheet.views = [{ state:'frozen', ySplit:2 }];
 
-    // Data rows
+    // ---- Left block: one row per sign-up, starting row 3 ----
     rows.forEach((r, idx)=>{
-      const row = sheet.addRow({
-        name: r.name,
-        firstName: r.firstName,
-        email: r.email,
-        role: r.role,
-        description: r.description,
-        date: r.date,
-        time: r.time
-      });
-      row.getCell(6).numFmt = 'mmm d, yyyy'; // Date is the 6th column
-      row.eachCell({ includeEmpty:true }, c=>{
-        c.alignment = { vertical:'top', wrapText:true };
-        c.border = { bottom:{ style:'hair', color:{ argb:'FFDCD5C0' } } };
-      });
-      if(idx % 2 === 1){
-        row.eachCell({ includeEmpty:true }, c=>{
-          c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFF6F9F5' } };
-        });
+      const row = sheet.getRow(3+idx);
+      row.getCell(1).value = r.name;
+      row.getCell(2).value = r.firstName;
+      row.getCell(3).value = r.email;
+      row.getCell(4).value = r.role;
+      row.getCell(5).value = r.description;
+      row.getCell(6).value = r.date;
+      row.getCell(6).numFmt = 'mmm d, yyyy';
+      row.getCell(7).value = r.time;
+      for(let c=1; c<=7; c++){
+        const cell = row.getCell(c);
+        cell.alignment = { vertical:'top', wrapText:true };
+        cell.border = { bottom:{ style:'hair', color:{ argb:LINE } } };
+        if(idx % 2 === 1) cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:STRIPE } };
       }
     });
+
+    // ---- Right block: month-at-a-glance grid, independent row flow ----
+    const byDay = {};
+    rows.forEach(r=>{
+      const dayNum = r.date.getDate();
+      (byDay[dayNum] = byDay[dayNum] || []).push(r.firstName || r.name);
+    });
+
+    let gridRow = 3;
+    let dayCursor = 1 - firstDow;
+    while(dayCursor <= numDays){
+      const weekDays = [0,1,2,3,4,5,6].map(i => dayCursor + i);
+      dayCursor += 7;
+
+      const dateRow = sheet.getRow(gridRow);
+      weekDays.forEach((dayNum, i)=>{
+        if(dayNum >= 1 && dayNum <= numDays){
+          const cell = dateRow.getCell(9+i);
+          cell.value = dayNum;
+          cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:LIGHT_GREEN } };
+          cell.font = { bold:true, color:{ argb:DARK } };
+          cell.alignment = { horizontal:'center', vertical:'middle' };
+          cell.border = { top:{ style:'thin', color:{ argb:LINE } } };
+        }
+      });
+      dateRow.height = 18;
+      gridRow++;
+
+      const namesPerDay = weekDays.map(dayNum => (dayNum>=1 && dayNum<=numDays) ? (byDay[dayNum]||[]) : []);
+      const maxNames = Math.max(0, ...namesPerDay.map(a=>a.length));
+      for(let n=0; n<maxNames; n++){
+        const nameRow = sheet.getRow(gridRow);
+        namesPerDay.forEach((names, i)=>{
+          if(names[n]){
+            const cell = nameRow.getCell(9+i);
+            cell.value = names[n];
+            cell.alignment = { horizontal:'center' };
+            cell.border = { bottom:{ style:'hair', color:{ argb:LINE } } };
+          }
+        });
+        gridRow++;
+      }
+    }
 
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -1284,6 +1342,7 @@ async function exportMonthExcel(){
     render();
   }
 }
+
 
 
 function renderCalendar(){
