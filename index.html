@@ -690,7 +690,7 @@ let state = {
   session:null,
   profile:null,          // {id, name, is_admin} for the signed-in user
   profiles:[],           // all profiles, for name lookups + admin roster
-  churchName:'Our Church',
+  churchName:'Chapel of St. Paul',
   roles:[],
   slots:[],
   signups:[],            // [{id, slot_id, user_id, signup_date}]
@@ -796,7 +796,7 @@ async function init(){
   // Fetch the church name for the signed-out login/register screens too.
   // This is safe to attempt before auth as long as `church_settings` has a
   // public-read policy (see the SQL note); if it doesn't yet, this just
-  // fails quietly and the "Our Church" fallback is used instead.
+  // fails quietly and the default church name fallback is used instead.
   await fetchChurchNamePublic();
 
   const { data:{ session } } = await sb.auth.getSession();
@@ -816,7 +816,7 @@ async function fetchChurchNamePublic(){
     if(data && data.church_name) state.churchName = data.church_name;
   }catch(e){
     // Graceful fallback: keep whatever state.churchName already is
-    // (the "Our Church" default) if this table isn't publicly readable yet.
+    // (the default church name) if this table isn't publicly readable yet.
   }
 }
 
@@ -845,7 +845,7 @@ async function fetchAll(){
     state.roles = rolesRes.data || [];
     state.slots = slotsRes.data || [];
     state.signups = signupsRes.data || [];
-    state.churchName = (settingsRes.data && settingsRes.data.church_name) || 'Our Church';
+    state.churchName = (settingsRes.data && settingsRes.data.church_name) || 'Chapel of St. Paul';
     state.profiles = profilesRes.data || [];
     state.profile = myProfileRes.data || null;
     state.announcements = announcementsRes.data || [];
@@ -2356,7 +2356,7 @@ function render(){
 
   const headingText = state.view==='admin' ? ['Admin','Manage roles, slots, and volunteers']
     : state.view==='my-signups' ? ['My Sign-Ups','Your upcoming volunteer commitments']
-    : [state.churchName, 'Volunteer sign-up'];
+    : [state.churchName, 'Coyle Hall Office of Liturgies'];
   const heading = `<div class="brand-row"><img class="brand-logo" src="${LOGO_DATA_URI}" alt="${escapeAttr(state.churchName)} logo"><div class="titleblock"><h1>${escapeHtml(headingText[0])}</h1><p>${escapeHtml(headingText[1])}</p></div></div>`;
 
   const errorHtml = state.errorBanner
