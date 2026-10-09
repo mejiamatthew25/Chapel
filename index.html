@@ -353,6 +353,13 @@
     padding:6px 10px;
   }
   .note-line strong{ color:var(--ink); font-weight:600; }
+  /* Long unbroken strings (URLs) should wrap inside their box instead of spilling out */
+  .note-line, .slot-desc, .past-note, .announcement-title, .announcement-body,
+  .announcement-meta, .slot-row, .announcement-card{
+    overflow-wrap:anywhere;
+    word-break:break-word;
+    min-width:0;
+  }
   .chip{
     display:flex;
     align-items:center;
@@ -1163,40 +1170,65 @@ async function exportMonthExcel(){
     const numDays = new Date(cm.getFullYear(), cm.getMonth()+1, 0).getDate();
     const firstDow = new Date(cm.getFullYear(), cm.getMonth(), 1).getDay();
 
-    // ---- Gather one row per volunteer sign-up (feeds both the flat list and the grid) ----
+    // ---- Gather one row per volunteer sign-up, plus one placeholder row per
+    //      still-open spot (feeds both the flat list and the grid) ----
     const rows = [];
+    let slotInstanceCount = 0;
     for(let day=1; day<=numDays; day++){
       const d = new Date(cm.getFullYear(), cm.getMonth(), day);
       const iso = isoDate(d);
       const daySlots = slotsForDate(d);
       for(const {slot, role} of daySlots){
+        slotInstanceCount++;
         const filled = signupsFor(slot.id, iso);
+        const timeStr = `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`;
         for(const e of filled){
           const fullName = profileName(e.user_id);
           rows.push({
             userId: e.user_id,
+            isOpen: false,
             name: fullName,
             firstName: (fullName||'').trim().split(/\s+/)[0] || '',
             role: role.name,
             description: slot.description || '',
             date: d,
-            time: `${fmtTime(slot.start_time)} – ${fmtTime(slot.end_time)}`
+            time: timeStr
+          });
+        }
+        const openSpots = Math.max(0, slot.capacity - filled.length);
+        for(let i=0; i<openSpots; i++){
+          rows.push({
+            userId: null,
+            isOpen: true,
+            name: role.name,          // placeholder: shows the role until someone is assigned
+            firstName: role.name,
+            role: role.name,
+            description: slot.description || '',
+            date: d,
+            time: timeStr
           });
         }
       }
     }
 
-    if(rows.length === 0){
-      state.exportError = `No one is signed up to volunteer in ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} yet.`;
+    if(slotInstanceCount === 0){
+      state.exportError = `There's nothing scheduled in ${MONTH_NAMES[cm.getMonth()]} ${cm.getFullYear()} to export.`;
       state.exportingMonth = false;
       render();
       return;
     }
 
-    rows.sort((a,b)=> a.date - b.date || a.time.localeCompare(b.time) || a.name.localeCompare(b.name));
+    // Group by day/time/role, filled sign-ups before open spots within each role
+    rows.sort((a,b)=>
+      a.date - b.date ||
+      a.time.localeCompare(b.time) ||
+      a.role.localeCompare(b.role) ||
+      (a.isOpen - b.isOpen) ||
+      a.name.localeCompare(b.name)
+    );
 
-    const emailMap = await fetchEmailsForUsers(rows.map(r=>r.userId));
-    rows.forEach(r=>{ r.email = emailMap[r.userId] || ''; });
+    const emailMap = await fetchEmailsForUsers(rows.filter(r=>!r.isOpen).map(r=>r.userId));
+    rows.forEach(r=>{ r.email = r.isOpen ? '' : (emailMap[r.userId] || ''); });
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = state.churchName;
@@ -1209,8 +1241,9 @@ async function exportMonthExcel(){
     const LIGHT_GREEN = 'FFE1EBDE';
     const STRIPE = 'FFF6F9F5';
     const LINE = 'FFDCD5C0';
+    const OPEN_TEXT = 'FFA24C42';
 
-    // ---- Columns: A–G flat list, H spacer, I–O day-of-week grid ----
+    // ---- Columns: flat list (A–H), one spacer, then the day-of-week grid ----
     const leftColumns = [
       { header:'Name', key:'name', width:22 },
       { header:'First Name', key:'firstName', width:14 },
@@ -1218,8 +1251,13 @@ async function exportMonthExcel(){
       { header:'Role', key:'role', width:20 },
       { header:'Description', key:'description', width:32 },
       { header:'Date', key:'date', width:13 },
-      { header:'Time', key:'time', width:20 }
+      { header:'Time', key:'time', width:20 },
+      { header:'Status', key:'status', width:12 }
     ];
+    const LEFT_N = leftColumns.length;      // flat-list columns
+    const SPACER_COL = LEFT_N + 1;          // blank divider column
+    const GRID_START = LEFT_N + 2;          // first day-of-week column
+    const GRID_END = GRID_START + 6;        // last day-of-week column
     const dayColumns = DAY_NAMES.map(d => ({ header: d.toUpperCase(), width: 14 }));
 
     sheet.columns = [
@@ -1229,37 +1267,37 @@ async function exportMonthExcel(){
     ];
 
     // ---- Row 1: two title banners, side by side ----
-    sheet.mergeCells(1,1,1,7);
+    sheet.mergeCells(1,1,1,LEFT_N);
     const leftTitle = sheet.getCell(1,1);
     leftTitle.value = `${state.churchName} — Volunteer Schedule`;
     leftTitle.font = { bold:true, size:14, color:{ argb:'FFFFFFFF' } };
     leftTitle.alignment = { vertical:'middle', horizontal:'left' };
 
-    sheet.mergeCells(1,9,1,15);
-    const rightTitle = sheet.getCell(1,9);
+    sheet.mergeCells(1,GRID_START,1,GRID_END);
+    const rightTitle = sheet.getCell(1,GRID_START);
     rightTitle.value = `${MONTH_NAMES[cm.getMonth()].toUpperCase()} ${cm.getFullYear()}`;
     rightTitle.font = { bold:true, size:14, color:{ argb:'FFFFFFFF' } };
     rightTitle.alignment = { vertical:'middle', horizontal:'center' };
 
     sheet.getRow(1).height = 30;
-    for(let c=1; c<=15; c++){
-      if(c===8) continue;
+    for(let c=1; c<=GRID_END; c++){
+      if(c===SPACER_COL) continue;
       sheet.getCell(1,c).fill = { type:'pattern', pattern:'solid', fgColor:{ argb:DARK } };
     }
 
     // ---- Row 2: headers for both blocks ----
     const headerRow = sheet.getRow(2);
     leftColumns.forEach((col,i)=>{ headerRow.getCell(i+1).value = col.header; });
-    dayColumns.forEach((col,i)=>{ headerRow.getCell(9+i).value = col.header; });
-    for(let c=1; c<=15; c++){
-      if(c===8) continue;
+    dayColumns.forEach((col,i)=>{ headerRow.getCell(GRID_START+i).value = col.header; });
+    for(let c=1; c<=GRID_END; c++){
+      if(c===SPACER_COL) continue;
       const cell = headerRow.getCell(c);
       cell.font = { bold:true, color:{ argb:'FFFFFFFF' } };
       cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:MID_GREEN } };
       cell.alignment = { vertical:'middle', horizontal:'center' };
     }
     headerRow.height = 20;
-    sheet.autoFilter = { from:{ row:2, column:1 }, to:{ row:2, column:7 } };
+    sheet.autoFilter = { from:{ row:2, column:1 }, to:{ row:2, column:LEFT_N } };
     sheet.views = [{ state:'frozen', ySplit:2 }];
 
     // ---- Left block: one row per sign-up, starting row 3 ----
@@ -1273,12 +1311,35 @@ async function exportMonthExcel(){
       row.getCell(6).value = r.date;
       row.getCell(6).numFmt = 'mmm d, yyyy';
       row.getCell(7).value = r.time;
-      for(let c=1; c<=7; c++){
+      // Status is a live formula: typing a name over a placeholder flips it to "Assigned"
+      row.getCell(8).value = {
+        formula: `IF(OR(TRIM(A${3+idx})="",A${3+idx}=D${3+idx}),"Open","Assigned")`,
+        result: r.isOpen ? 'Open' : 'Assigned'
+      };
+      for(let c=1; c<=LEFT_N; c++){
         const cell = row.getCell(c);
-        cell.alignment = { vertical:'top', wrapText:true };
+        cell.alignment = c === 8
+          ? { vertical:'top', horizontal:'center' }
+          : { vertical:'top', wrapText:true };
         cell.border = { bottom:{ style:'hair', color:{ argb:LINE } } };
         if(idx % 2 === 1) cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:STRIPE } };
       }
+      if(r.isOpen){
+        // Unfilled spot: role name shown as an italic placeholder until someone is assigned
+        row.getCell(1).font = { italic:true, color:{ argb:OPEN_TEXT } };
+        row.getCell(2).font = { italic:true, color:{ argb:OPEN_TEXT } };
+      }
+    });
+
+    // Color the Status column from its own value, so it stays right after manual edits
+    sheet.addConditionalFormatting({
+      ref: `H3:H${2 + rows.length}`,
+      rules: [
+        { type:'cellIs', operator:'equal', formulae:['"Open"'], priority:1,
+          style:{ font:{ bold:true, color:{ argb:OPEN_TEXT } } } },
+        { type:'cellIs', operator:'equal', formulae:['"Assigned"'], priority:2,
+          style:{ font:{ bold:true, color:{ argb:MID_GREEN } } } }
+      ]
     });
 
     // ---- Right block: month-at-a-glance grid, independent row flow ----
@@ -1290,7 +1351,7 @@ async function exportMonthExcel(){
     rows.forEach((r, idx)=>{
       const dayNum = r.date.getDate();
       const excelRow = 3 + idx;
-      (byDay[dayNum] = byDay[dayNum] || []).push({ excelRow, name: r.firstName || r.name });
+      (byDay[dayNum] = byDay[dayNum] || []).push({ excelRow, name: r.firstName || r.name, isOpen: r.isOpen });
     });
 
     let gridRow = 3;
@@ -1302,7 +1363,7 @@ async function exportMonthExcel(){
       const dateRow = sheet.getRow(gridRow);
       weekDays.forEach((dayNum, i)=>{
         if(dayNum >= 1 && dayNum <= numDays){
-          const cell = dateRow.getCell(9+i);
+          const cell = dateRow.getCell(GRID_START+i);
           cell.value = dayNum;
           cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:LIGHT_GREEN } };
           cell.font = { bold:true, color:{ argb:DARK } };
@@ -1320,8 +1381,9 @@ async function exportMonthExcel(){
         entriesPerDay.forEach((entries, i)=>{
           const entry = entries[n];
           if(entry){
-            const cell = nameRow.getCell(9+i);
+            const cell = nameRow.getCell(GRID_START+i);
             cell.value = { formula: `B${entry.excelRow}`, result: entry.name };
+            if(entry.isOpen) cell.font = { italic:true, color:{ argb:OPEN_TEXT } };
             cell.alignment = { horizontal:'center' };
             cell.border = { bottom:{ style:'hair', color:{ argb:LINE } } };
           }
