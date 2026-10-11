@@ -608,15 +608,17 @@
   .user-item .uname{ color:var(--ink-soft); font-size:12.5px; }
   /* ---- weekly slots chart (Admin) ---- */
   .week-grid-wrap{ overflow-x:auto; margin-top:6px; border:1px solid var(--line); border-radius:8px; }
-  .week-grid{ border-collapse:collapse; width:100%; min-width:780px; font-size:12.5px; }
+  .week-grid{ border-collapse:collapse; width:100%; min-width:720px; table-layout:fixed; font-size:12.5px; }
   .week-grid th, .week-grid td{ border:1px solid var(--line); padding:6px; vertical-align:top; }
   .week-grid thead th{ background:var(--gold); color:var(--white); font-weight:600; text-align:center; }
   .week-grid thead th.week-corner{ text-align:left; }
+  .week-grid thead th.week-corner, .week-grid th.week-role{ width:132px; }
   .week-grid th.week-role{
-    background:var(--gold-soft); text-align:left; font-weight:600; white-space:nowrap;
+    background:var(--gold-soft); text-align:left; font-weight:600;
+    white-space:normal; overflow-wrap:anywhere;
     position:sticky; left:0;
   }
-  .week-grid td{ background:var(--white); min-width:96px; }
+  .week-grid td{ background:var(--white); }
   .week-chip{ background:var(--gold-soft); border-radius:6px; padding:5px 7px; margin-bottom:5px; }
   .week-chip.editing{ outline:2px solid var(--slate); }
   .week-chip-time{ font-weight:600; }
@@ -2123,6 +2125,18 @@ function exportRosterCSV(){
   setTimeout(()=>URL.revokeObjectURL(url), 2000);
 }
 
+// Compact times for the chart: 9:00-10:00 AM -> "9–10am", 11:00-13:00 -> "11am–1pm"
+function fmtTimeParts(t){
+  const [h,m] = t.split(':').map(Number);
+  const ap = h >= 12 ? 'pm' : 'am';
+  let h12 = h % 12; if(h12 === 0) h12 = 12;
+  return { text: m ? `${h12}:${String(m).padStart(2,'0')}` : `${h12}`, ap };
+}
+function fmtRangeShort(start, end){
+  const a = fmtTimeParts(start), b = fmtTimeParts(end);
+  return a.ap === b.ap ? `${a.text}–${b.text}${b.ap}` : `${a.text}${a.ap}–${b.text}${b.ap}`;
+}
+
 function scrollToEl(id){
   setTimeout(()=>{ const el = document.getElementById(id); if(el) el.scrollIntoView({ behavior:'smooth', block:'center' }); }, 0);
 }
@@ -2148,7 +2162,8 @@ function renderWeeklyGrid(weeklySlots){
         .sort((a,b)=>a.start_time.localeCompare(b.start_time));
       const chips = here.map(s=>{
         const target = `slot:${s.id}`;
-        const tip = s.description ? ` title="${escapeAttr(s.description)}"` : '';
+        const fullRange = `${fmtTime(s.start_time)} – ${fmtTime(s.end_time)}`;
+        const tip = ` title="${escapeAttr(fullRange + (s.description ? ' — ' + s.description : ''))}"`;
         const actions = state.confirmTarget === target
           ? `<span class="confirm-inline">Delete?
                <button class="yes" onclick="deleteSlot('${s.id}')">Yes</button>
@@ -2159,7 +2174,7 @@ function renderWeeklyGrid(weeklySlots){
                <button class="small-link" onclick="state.confirmTarget='${target}'; render()">Delete</button>
              </span>`;
         return `<div class="week-chip ${state.editingSlotId===s.id?'editing':''}"${tip}>
-            <div class="week-chip-time">${fmtTime(s.start_time)}–${fmtTime(s.end_time)}</div>
+            <div class="week-chip-time">${fmtRangeShort(s.start_time, s.end_time)}</div>
             <div class="week-chip-meta">needs ${s.capacity}${s.description ? ' · 📝' : ''}</div>
             ${actions}
           </div>`;
