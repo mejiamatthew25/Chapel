@@ -6,7 +6,7 @@
   <title>Chapel of St. Paul - Coyle Hall</title>
   <style>
     :root {
-      --bg-color: #0d2818;          /* Deep Forest / Dark Green Background */
+      --bg-color: #0d2818;          /* Deep Forest Dark Green Background */
       --card-bg: #163824;        /* Dark Green Card Background */
       --text-main: #ffffff;      /* Clean White Text */
       --text-muted: #d1e7dd;     /* Soft Off-White for Subtitles */
@@ -46,12 +46,20 @@
       border: 1px solid var(--accent-border);
     }
 
-    .logo {
-      width: 130px;
-      height: auto;
+    .logo-container {
       margin-bottom: 20px;
-      /* Blends white background of image seamlessly into dark card */
-      mix-blend-mode: screen; 
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .logo {
+      max-width: 140px;
+      width: 100%;
+      height: auto;
+      /* Inverts the black artwork to crisp white lines for dark mode */
+      filter: invert(1) brightness(2) contrast(100%);
+      mix-blend-mode: screen;
       opacity: 0.95;
     }
 
@@ -130,8 +138,9 @@
 <body>
 
   <div class="container">
-    <!-- Make sure your image file is uploaded as CHOL.png in the same directory -->
-    <img src="CHOL.png" alt="Coyle Hall Office of Liturgy Logo" class="logo">
+    <div class="logo-container">
+      <img src="CHOL.png" alt="Coyle Hall Office of Liturgy Logo" class="logo" id="logoImg">
+    </div>
 
     <h1 class="header-title">Chapel of St. Paul</h1>
     <div class="header-subtitle">Coyle Hall</div>
